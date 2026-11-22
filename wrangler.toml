@@ -1,0 +1,9 @@
+name = "dasteva-recruitment"
+compatibility_date = "2025-01-01"
+pages_build_output_dir = "dist"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "dasteva-recruitment-db"
+database_id = "00000000-0000-0000-0000-000000000000" # پس از ساخت دیتابیس در کلودفلر، شناسه واقعی را جایگزین کنید
+migrations_dir = "migrations"

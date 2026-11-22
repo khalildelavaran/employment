@@ -1,0 +1,6 @@
+{
+  "name": "سامانه جامع استخدام شرکت دستوا",
+  "description": "سامانه تحت وب مدیریت جذب و استخدام، تشکیل پرونده متقاضیان، مدیریت مصاحبه‌ها، ارزیابی، مقایسه و گزارش‌گیری منابع انسانی شرکت دستوا",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

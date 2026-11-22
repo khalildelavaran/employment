@@ -1,0 +1,219 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --theme-bg-canvas: #F4F7FE;
+  --theme-bg-surface: #FFFFFF;
+  --theme-bg-subtle: #F8FAFC;
+  --theme-bg-hover: #EFF6FF;
+  --theme-sidebar-bg: #FFFFFF;
+  --theme-sidebar-border: #E2E8F0;
+  --theme-sidebar-text: #0F172A;
+  --theme-sidebar-muted: #64748B;
+  --theme-sidebar-active-bg: #2563EB;
+  --theme-sidebar-active-text: #FFFFFF;
+  --theme-text-primary: #0F172A;
+  --theme-text-secondary: #334155;
+  --theme-text-muted: #64748B;
+  --theme-border: #E2E8F0;
+  --theme-primary: #2563EB;
+  --theme-primary-hover: #1D4ED8;
+  --theme-primary-soft: #DBEAFE;
+  --theme-primary-text: #FFFFFF;
+  --theme-chart-1: #2563EB;
+  --theme-chart-2: #4F46E5;
+  --theme-chart-3: #059669;
+  --theme-shadow: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.04);
+
+  /* Design Tokens Architecture (--ta-*) */
+  --ta-primary: #2563EB;
+  --ta-primary-hover: #1D4ED8;
+  --ta-primary-soft: #DBEAFE;
+  --ta-whiten: #F4F7FE;
+  --ta-card-bg: #FFFFFF;
+  --ta-table-head: #F8FAFC;
+  --ta-stroke: #E2E8F0;
+  --ta-black: #0F172A;
+  --ta-body: #334155;
+  --ta-muted: #64748B;
+  --ta-sidebar-bg: #FFFFFF;
+  --ta-sidebar-text: #0F172A;
+  --ta-sidebar-active-bg: #2563EB;
+  --ta-topbar-bg: #FFFFFF;
+  --ta-chart-1: #2563EB;
+  --ta-chart-2: #4F46E5;
+  --ta-chart-3: #059669;
+  --ta-shadow-card: 0 1px 3px 0 rgba(15, 23, 42, 0.06), 0 1px 2px -1px rgba(15, 23, 42, 0.04);
+}
+
+@layer base {
+  html, body {
+    font-family: 'Vazirmatn', system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    direction: rtl;
+    background-color: var(--ta-whiten, var(--theme-bg-canvas)) !important;
+    color: var(--ta-black, var(--theme-text-primary)) !important;
+    transition: background-color 0.2s ease, color 0.2s ease;
+  }
+
+  input, select, textarea, button, table, .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+/* Global Theme Token Mapping for Full-Dashboard Visual Transformation */
+@media screen {
+  /* 1. Main Canvas Backgrounds */
+  .bg-slate-100,
+  .dark .dark\:bg-slate-950 {
+    background-color: var(--ta-whiten, var(--theme-bg-canvas)) !important;
+  }
+
+  /* 2. Card, Header, Modal & Table Surfaces */
+  .bg-white,
+  .dark .dark\:bg-slate-900 {
+    background-color: var(--ta-card-bg, var(--theme-bg-surface)) !important;
+    box-shadow: var(--ta-shadow-card, var(--theme-shadow));
+  }
+
+  /* 3. Subtle Secondary Surfaces, Form Inputs & Table Headers */
+  .bg-slate-50,
+  .bg-slate-50\/50,
+  .bg-slate-50\/80,
+  .dark .dark\:bg-slate-800,
+  .dark .dark\:bg-slate-800\/30,
+  .dark .dark\:bg-slate-800\/40,
+  .dark .dark\:bg-slate-800\/50,
+  .dark .dark\:bg-slate-800\/60 {
+    background-color: var(--ta-table-head, var(--theme-bg-subtle)) !important;
+  }
+
+  /* 4. Sidebar Identity */
+  .theme-sidebar {
+    background-color: var(--ta-sidebar-bg, var(--theme-sidebar-bg)) !important;
+    color: var(--ta-sidebar-text, var(--theme-sidebar-text)) !important;
+    border-color: var(--theme-sidebar-border) !important;
+  }
+
+  .theme-sidebar-border {
+    border-color: var(--theme-sidebar-border) !important;
+  }
+
+  .theme-sidebar-item-active {
+    background-color: var(--ta-sidebar-active-bg, var(--theme-sidebar-active-bg)) !important;
+    color: var(--theme-sidebar-active-text) !important;
+  }
+
+  /* 5. Borders & Dividers */
+  .border-slate-100,
+  .border-slate-200,
+  .border-slate-300,
+  .dark .dark\:border-slate-700,
+  .dark .dark\:border-slate-800 {
+    border-color: var(--ta-stroke, var(--theme-border)) !important;
+  }
+
+  .divide-slate-200 > :not([hidden]) ~ :not([hidden]),
+  .dark .dark\:divide-slate-800 > :not([hidden]) ~ :not([hidden]) {
+    border-color: var(--ta-stroke, var(--theme-border)) !important;
+  }
+
+  /* 6. Typography Hierarchy */
+  .text-slate-900,
+  .dark .dark\:text-white,
+  .dark .dark\:text-slate-100 {
+    color: var(--ta-black, var(--theme-text-primary)) !important;
+  }
+
+  .text-slate-800,
+  .text-slate-700,
+  .text-slate-600,
+  .dark .dark\:text-slate-200,
+  .dark .dark\:text-slate-300 {
+    color: var(--ta-body, var(--theme-text-secondary)) !important;
+  }
+
+  .text-slate-500,
+  .text-slate-400,
+  .dark .dark\:text-slate-400 {
+    color: var(--ta-muted, var(--theme-text-muted)) !important;
+  }
+
+  /* 7. Primary Interactive Accents (Buttons, Links, Badges, Charts) */
+  .bg-blue-600,
+  .bg-\[\#3C50E0\],
+  .dark .dark\:bg-blue-600 {
+    background-color: var(--ta-primary, var(--theme-primary)) !important;
+    color: var(--theme-primary-text) !important;
+  }
+
+  .hover\:bg-blue-700:hover,
+  .dark .dark\:hover\:bg-blue-700:hover {
+    background-color: var(--ta-primary-hover, var(--theme-primary-hover)) !important;
+  }
+
+  .text-blue-600,
+  .text-blue-700,
+  .dark .dark\:text-blue-400,
+  .dark .dark\:text-blue-300 {
+    color: var(--ta-primary, var(--theme-primary)) !important;
+  }
+
+  .border-blue-600,
+  .border-blue-500,
+  .focus\:border-blue-600:focus,
+  .hover\:border-blue-500:hover {
+    border-color: var(--ta-primary, var(--theme-primary)) !important;
+  }
+
+  .bg-blue-50,
+  .bg-blue-50\/50,
+  .bg-blue-50\/40,
+  .dark .dark\:bg-blue-950\/60,
+  .dark .dark\:bg-blue-950\/40,
+  .dark .dark\:bg-blue-950\/30 {
+    background-color: var(--ta-primary-soft, var(--theme-primary-soft)) !important;
+  }
+
+  /* 8. Form Controls Contrast */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="color"]),
+  select,
+  textarea {
+    background-color: var(--ta-table-head, var(--theme-bg-subtle)) !important;
+    color: var(--ta-black, var(--theme-text-primary)) !important;
+    border-color: var(--ta-stroke, var(--theme-border)) !important;
+  }
+}
+
+@media print {
+  @page {
+    size: A4 portrait;
+    margin: 12mm;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+    direction: rtl !important;
+    font-family: 'Vazirmatn', sans-serif !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  .no-print {
+    display: none !important;
+  }
+
+  .print-only {
+    display: block !important;
+  }
+
+  .print-page-break {
+    page-break-after: always;
+    break-after: page;
+  }
+
+  .print-avoid-break {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "dasteva-recruitment-system",
+  "main": "server.ts",
+  "compatibility_date": "2026-03-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "dasteva_recruitment_dev",
+      "database_id": "00000000-0000-0000-0000-dastevadev01",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "env": {
+    "staging": {
+      "name": "dasteva-recruitment-staging",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "dasteva_recruitment_staging",
+          "database_id": "00000000-0000-0000-0000-dastevastg01",
+          "migrations_dir": "migrations"
+        }
+      ]
+    },
+    "production": {
+      "name": "dasteva-recruitment-production",
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "dasteva_recruitment_prod",
+          "database_id": "00000000-0000-0000-0000-dastevaprd01",
+          "migrations_dir": "migrations"
+        }
+      ]
+    }
+  }
+}

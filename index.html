@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="fa" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>سامانه جامع استخدام شرکت دستوا | مدیریت جذب و منابع انسانی</title>
+    <meta name="description" content="سامانه تحت وب مدیریت جذب و استخدام، تشکیل پرونده متقاضیان، مدیریت مصاحبه‌ها، ارزیابی، مقایسه و گزارش‌گیری منابع انسانی شرکت دستوا" />
+    <meta property="og:title" content="سامانه جامع استخدام شرکت دستوا" />
+    <meta property="og:description" content="سامانه تحت وب مدیریت جذب و استخدام، تشکیل پرونده متقاضیان، مدیریت مصاحبه‌ها، ارزیابی، مقایسه و گزارش‌گیری منابع انسانی شرکت دستوا" />
+    <meta property="og:type" content="website" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@300;400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      (function () {
+        try {
+          var presets = {
+            'azure-professional': { bgCanvas: '#F4F7FE', bgSurface: '#FFFFFF', bgSubtle: '#F8FAFC', sidebarBg: '#FFFFFF', sidebarText: '#0F172A', sidebarActiveBg: '#2563EB', textPrimary: '#0F172A', textSecondary: '#334155', textMuted: '#64748B', border: '#E2E8F0', primary: '#2563EB', primaryHover: '#1D4ED8', primarySoft: '#DBEAFE', isDark: false },
+            'midnight-executive': { bgCanvas: '#0B1120', bgSurface: '#16223D', bgSubtle: '#111C35', sidebarBg: '#111C35', sidebarText: '#E2E8F0', sidebarActiveBg: '#3B82F6', textPrimary: '#F8FAFC', textSecondary: '#CBD5E1', textMuted: '#94A3B8', border: '#1E2D4D', primary: '#3B82F6', primaryHover: '#2563EB', primarySoft: '#1E3A8A', isDark: true },
+            'ocean-breeze': { bgCanvas: '#ECFEFF', bgSurface: '#FFFFFF', bgSubtle: '#F0FDFA', sidebarBg: '#0E3A47', sidebarText: '#ECFEFF', sidebarActiveBg: '#0891B2', textPrimary: '#083344', textSecondary: '#155E75', textMuted: '#0E7490', border: '#BAE6FD', primary: '#0891B2', primaryHover: '#0E7490', primarySoft: '#CFFAFE', isDark: false },
+            'emerald-forest': { bgCanvas: '#F0FDF4', bgSurface: '#FFFFFF', bgSubtle: '#F4FBF7', sidebarBg: '#06392A', sidebarText: '#ECFDF5', sidebarActiveBg: '#059669', textPrimary: '#062C1E', textSecondary: '#14532D', textMuted: '#3F6251', border: '#BBF7D0', primary: '#059669', primaryHover: '#047857', primarySoft: '#D1FAE5', isDark: false },
+            'lavender-studio': { bgCanvas: '#F6F3FF', bgSurface: '#FFFFFF', bgSubtle: '#FAF8FF', sidebarBg: '#241445', sidebarText: '#F3E8FF', sidebarActiveBg: '#7C3AED', textPrimary: '#1E1B4B', textSecondary: '#3B0764', textMuted: '#6D28D9', border: '#DDD6FE', primary: '#7C3AED', primaryHover: '#6D28D9', primarySoft: '#EDE9FE', isDark: false },
+            'warm-sand': { bgCanvas: '#FAF6F0', bgSurface: '#FFFDF9', bgSubtle: '#F5EFE6', sidebarBg: '#2C1E14', sidebarText: '#F5EBE1', sidebarActiveBg: '#B45309', textPrimary: '#291D15', textSecondary: '#573D2B', textMuted: '#85644B', border: '#E6D7C3', primary: '#B45309', primaryHover: '#92400E', primarySoft: '#FEF3C7', isDark: false },
+            'rose-quartz': { bgCanvas: '#FFF5F7', bgSurface: '#FFFFFF', bgSubtle: '#FFF8FA', sidebarBg: '#3B1022', sidebarText: '#FCE7F3', sidebarActiveBg: '#E11D48', textPrimary: '#3B0A1E', textSecondary: '#681838', textMuted: '#9F1239', border: '#FBCFE8', primary: '#E11D48', primaryHover: '#BE123C', primarySoft: '#FFE4E6', isDark: false },
+            'graphite-minimal': { bgCanvas: '#121316', bgSurface: '#1E2026', bgSubtle: '#18191E', sidebarBg: '#18191E', sidebarText: '#E4E4E7', sidebarActiveBg: '#6366F1', textPrimary: '#F4F4F5', textSecondary: '#D4D4D8', textMuted: '#A1A1AA', border: '#2D313B', primary: '#6366F1', primaryHover: '#4F46E5', primarySoft: '#27272A', isDark: true },
+            'obsidian-gold': { bgCanvas: '#0C0A09', bgSurface: '#1C1917', bgSubtle: '#171412', sidebarBg: '#171412', sidebarText: '#F5F5F4', sidebarActiveBg: '#D97706', textPrimary: '#FAFAF9', textSecondary: '#E7E5E4', textMuted: '#A8A29E', border: '#292524', primary: '#D97706', primaryHover: '#B45309', primarySoft: '#451A03', isDark: true }
+          };
+          var savedId = localStorage.getItem('omid_theme_preset') || localStorage.getItem('dasteva_active_theme') || 'azure-professional';
+          var tokens = presets[savedId] || presets['azure-professional'];
+          if (savedId === 'custom-org') {
+            var rawCustom = localStorage.getItem('dasteva_custom_theme_tokens');
+            if (rawCustom) {
+              tokens = Object.assign({}, presets['azure-professional'], JSON.parse(rawCustom));
+            }
+          }
+          var root = document.documentElement;
+          root.setAttribute('data-theme', savedId);
+          if (tokens.isDark) root.classList.add('dark');
+          else root.classList.remove('dark');
+          root.style.setProperty('--theme-bg-canvas', tokens.bgCanvas);
+          root.style.setProperty('--theme-bg-surface', tokens.bgSurface);
+          root.style.setProperty('--theme-bg-subtle', tokens.bgSubtle);
+          root.style.setProperty('--theme-sidebar-bg', tokens.sidebarBg);
+          root.style.setProperty('--theme-sidebar-text', tokens.sidebarText || '#0F172A');
+          root.style.setProperty('--theme-sidebar-active-bg', tokens.sidebarActiveBg);
+          root.style.setProperty('--theme-text-primary', tokens.textPrimary);
+          root.style.setProperty('--theme-text-secondary', tokens.textSecondary);
+          root.style.setProperty('--theme-text-muted', tokens.textMuted);
+          root.style.setProperty('--theme-border', tokens.border);
+          root.style.setProperty('--theme-primary', tokens.primary);
+          root.style.setProperty('--theme-primary-hover', tokens.primaryHover);
+          root.style.setProperty('--theme-primary-soft', tokens.primarySoft);
+
+          root.style.setProperty('--ta-primary', tokens.primary);
+          root.style.setProperty('--ta-primary-hover', tokens.primaryHover);
+          root.style.setProperty('--ta-primary-soft', tokens.primarySoft);
+          root.style.setProperty('--ta-whiten', tokens.bgCanvas);
+          root.style.setProperty('--ta-card-bg', tokens.bgSurface);
+          root.style.setProperty('--ta-table-head', tokens.bgSubtle);
+          root.style.setProperty('--ta-stroke', tokens.border);
+          root.style.setProperty('--ta-black', tokens.textPrimary);
+          root.style.setProperty('--ta-body', tokens.textSecondary);
+          root.style.setProperty('--ta-muted', tokens.textMuted);
+          root.style.setProperty('--ta-sidebar-bg', tokens.sidebarBg);
+          root.style.setProperty('--ta-sidebar-text', tokens.sidebarText || '#0F172A');
+          root.style.setProperty('--ta-sidebar-active-bg', tokens.sidebarActiveBg);
+          root.style.setProperty('--ta-topbar-bg', tokens.bgSurface);
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body class="bg-slate-100 text-slate-900 dark:bg-slate-950 dark:text-slate-100 antialiased selection:bg-blue-600 selection:text-white">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
