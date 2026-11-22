@@ -312,6 +312,8 @@ export interface SmsSettingsConfig {
   admin_2fa_enabled: boolean;
   otp_expiry_seconds: number;
   otp_resend_seconds: number;
+  /** 0 = auto-detect tariff from FarazSMS balance_amount / balance_count; >0 = manual override in Toman per SMS page */
+  unit_cost_toman: number;
   templates: Record<SmsEventKey, SmsTemplateConfig>;
   updated_at_jalali: string;
 }
@@ -351,6 +353,8 @@ export interface FarazProviderStatus {
   key_title: string;
   masked_key: string;
   balance_toman: number | null;
+  balance_count?: number | null;
+  derived_unit_cost_toman?: number | null;
   lines: FarazLineItem[];
   patterns: FarazPatternItem[];
   error?: string;
@@ -395,5 +399,57 @@ export interface SmsLogsSummary {
   skipped: number;
   delivery_rate: number;
 }
+
+export interface SmsMonthlyAnalyticsPoint {
+  month_key: string;
+  month_label: string;
+  total: number;
+  sent: number;
+  failed: number;
+  pages: number;
+  spend_toman: number;
+}
+
+export interface SmsEventAnalyticsPoint {
+  event_type: string;
+  label: string;
+  total: number;
+  sent: number;
+  failed: number;
+  pages: number;
+  spend_toman: number;
+}
+
+export interface SmsModeAnalyticsPoint {
+  mode: SmsSendMode;
+  label: string;
+  total: number;
+  sent: number;
+  failed: number;
+}
+
+export interface SmsAnalyticsData {
+  overview: {
+    total: number;
+    sent: number;
+    failed: number;
+    skipped: number;
+    delivery_rate: number;
+    total_pages: number;
+    total_spend_toman: number;
+    current_month_label: string;
+    current_month_sent: number;
+    current_month_pages: number;
+    current_month_spend_toman: number;
+    effective_unit_cost_toman: number;
+    tariff_source: 'manual' | 'auto' | 'fallback';
+    auto_unit_cost_toman: number | null;
+    manual_unit_cost_toman: number;
+  };
+  monthly_trend: SmsMonthlyAnalyticsPoint[];
+  by_event: SmsEventAnalyticsPoint[];
+  by_mode: SmsModeAnalyticsPoint[];
+}
+
 
 

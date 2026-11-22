@@ -302,6 +302,7 @@ CREATE TABLE IF NOT EXISTS sms_settings (
   admin_2fa_enabled INTEGER NOT NULL DEFAULT 0,
   otp_expiry_seconds INTEGER NOT NULL DEFAULT 120,
   otp_resend_seconds INTEGER NOT NULL DEFAULT 60,
+  unit_cost_toman REAL NOT NULL DEFAULT 0,
   templates_json TEXT NOT NULL DEFAULT '{}',
   updated_at_jalali TEXT NOT NULL DEFAULT ''
 );

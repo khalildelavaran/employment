@@ -6,15 +6,24 @@ import type {
   FarazLineItem,
   FarazPatternItem,
   FarazProviderStatus,
+  SmsAnalyticsData,
+  SmsEventAnalyticsPoint,
   SmsEventKey,
   SmsLogRecord,
   SmsLogsSummary,
+  SmsModeAnalyticsPoint,
+  SmsMonthlyAnalyticsPoint,
   SmsSendMode,
   SmsSettingsConfig,
   SmsTemplateConfig,
 } from '../types/recruitment.ts';
 import { CUSTOM_SMS_TRIGGER_OPTIONS } from '../types/recruitment.ts';
-import { getCurrentJalaliDateTime, toEnglishDigits, validateIranianMobile } from '../utils/validation.ts';
+import {
+  getCurrentJalaliDateTime,
+  toEnglishDigits,
+  toPersianDigits,
+  validateIranianMobile,
+} from '../utils/validation.ts';
 
 export const DEFAULT_SMS_TEMPLATES: Record<SmsEventKey, SmsTemplateConfig> = {
   OTP: {
@@ -61,6 +70,7 @@ export function getDefaultSmsSettings(): SmsSettingsConfig {
     admin_2fa_enabled: false,
     otp_expiry_seconds: 120,
     otp_resend_seconds: 60,
+    unit_cost_toman: 0,
     templates: structuredClone(DEFAULT_SMS_TEMPLATES),
     updated_at_jalali: '',
   };
@@ -147,6 +157,7 @@ export function getSmsSettingsRow(db: D1DatabaseAdapter): SmsSettingsConfig {
     admin_2fa_enabled: Number(row.admin_2fa_enabled) === 1,
     otp_expiry_seconds: Math.max(60, Math.min(600, Number(row.otp_expiry_seconds || 120))),
     otp_resend_seconds: Math.max(30, Math.min(300, Number(row.otp_resend_seconds || 60))),
+    unit_cost_toman: Math.max(0, Math.min(50000, Number(row.unit_cost_toman || 0))),
     templates: normalizeSmsTemplates(parsedTemplates),
     updated_at_jalali: String(row.updated_at_jalali || ''),
   };
@@ -155,6 +166,10 @@ export function getSmsSettingsRow(db: D1DatabaseAdapter): SmsSettingsConfig {
 export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSettingsConfig>): SmsSettingsConfig {
   const current = getSmsSettingsRow(db);
   const nowJalali = getCurrentJalaliDateTime();
+  const rawUnitCost =
+    input.unit_cost_toman !== undefined ? Number(input.unit_cost_toman) : current.unit_cost_toman;
+  const cleanUnitCost = Number.isFinite(rawUnitCost) ? Math.max(0, Math.min(50000, Math.round(rawUnitCost))) : 0;
+
   const next: SmsSettingsConfig = {
     sms_enabled: input.sms_enabled !== undefined ? Boolean(input.sms_enabled) : current.sms_enabled,
     send_mode: input.send_mode === 'text' || input.send_mode === 'pattern' ? input.send_mode : current.send_mode,
@@ -180,6 +195,7 @@ export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSett
       input.otp_resend_seconds !== undefined
         ? Math.max(30, Math.min(300, Number(input.otp_resend_seconds) || 60))
         : current.otp_resend_seconds,
+    unit_cost_toman: cleanUnitCost,
     templates: input.templates ? normalizeSmsTemplates(input.templates) : current.templates,
     updated_at_jalali: nowJalali,
   };
@@ -190,8 +206,8 @@ export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSett
       `INSERT INTO sms_settings (
         id, sms_enabled, send_mode, line_number, number_format, admin_mobile,
         applicant_2fa_enabled, admin_2fa_enabled, otp_expiry_seconds, otp_resend_seconds,
-        templates_json, updated_at_jalali
-      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        unit_cost_toman, templates_json, updated_at_jalali
+      ) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
       .bind(
         next.sms_enabled ? 1 : 0,
@@ -203,6 +219,7 @@ export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSett
         next.admin_2fa_enabled ? 1 : 0,
         next.otp_expiry_seconds,
         next.otp_resend_seconds,
+        next.unit_cost_toman,
         JSON.stringify(next.templates),
         next.updated_at_jalali
       )
@@ -219,6 +236,7 @@ export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSett
         admin_2fa_enabled = ?,
         otp_expiry_seconds = ?,
         otp_resend_seconds = ?,
+        unit_cost_toman = ?,
         templates_json = ?,
         updated_at_jalali = ?
        WHERE id = 1`
@@ -233,6 +251,7 @@ export function saveSmsSettingsRow(db: D1DatabaseAdapter, input: Partial<SmsSett
         next.admin_2fa_enabled ? 1 : 0,
         next.otp_expiry_seconds,
         next.otp_resend_seconds,
+        next.unit_cost_toman,
         JSON.stringify(next.templates),
         next.updated_at_jalali
       )
@@ -341,6 +360,29 @@ function parseBalanceResponse(data: unknown): number | null {
   return null;
 }
 
+function parseBalanceCountResponse(data: unknown): number | null {
+  if (!data || typeof data !== 'object') return null;
+  const obj = data as Record<string, unknown>;
+  for (const key of ['balance_count', 'sms_count', 'remaining_count']) {
+    if (key in obj) {
+      const n = extractNumber(obj[key]);
+      if (n !== null && n > 0) return n;
+    }
+  }
+  if ('data' in obj) {
+    return parseBalanceCountResponse(obj.data);
+  }
+  return null;
+}
+
+export function calculateSmsPages(text: string): number {
+  const len = (text || '').length;
+  if (len <= 0) return 1;
+  // Standard Unicode / Persian SMS segmentation: 70 chars single-part, 67 chars multi-part
+  if (len <= 70) return 1;
+  return Math.ceil(len / 67);
+}
+
 function parseLinesResponse(data: unknown): FarazLineItem[] {
   const arr = findFirstArray(data);
   const items: FarazLineItem[] = [];
@@ -403,6 +445,8 @@ function findFirstArray(data: unknown): unknown[] {
 }
 
 let cachedDefaultLine: { number: string; fetchedAt: number } | null = null;
+let cachedDerivedTariff: { unitCostToman: number; fetchedAt: number } | null = null;
+const FALLBACK_UNIT_COST_TOMAN = 197;
 
 export async function fetchFarazProviderStatus(): Promise<FarazProviderStatus> {
   const cfg = getFarazRuntimeConfig();
@@ -414,6 +458,8 @@ export async function fetchFarazProviderStatus(): Promise<FarazProviderStatus> {
       key_title: cfg.keyTitle,
       masked_key: '',
       balance_toman: null,
+      balance_count: null,
+      derived_unit_cost_toman: null,
       lines: [],
       patterns: [],
       error: 'کلید دسترسی فراز اس‌ام‌اس تنظیم نشده است.',
@@ -427,6 +473,16 @@ export async function fetchFarazProviderStatus(): Promise<FarazProviderStatus> {
   ]);
 
   const balance = balRes.ok ? parseBalanceResponse(balRes.data) : null;
+  const balanceCount = balRes.ok ? parseBalanceCountResponse(balRes.data) : null;
+  const derivedUnitCost =
+    balance !== null && balanceCount !== null && balanceCount > 0
+      ? Math.max(1, Math.round(balance / balanceCount))
+      : null;
+
+  if (derivedUnitCost !== null) {
+    cachedDerivedTariff = { unitCostToman: derivedUnitCost, fetchedAt: Date.now() };
+  }
+
   const lines = linesRes.ok ? parseLinesResponse(linesRes.data) : [];
   const patterns = patternsRes.ok ? parsePatternsResponse(patternsRes.data) : [];
 
@@ -444,10 +500,30 @@ export async function fetchFarazProviderStatus(): Promise<FarazProviderStatus> {
     key_title: cfg.keyTitle,
     masked_key: cfg.maskedKey,
     balance_toman: balance,
+    balance_count: balanceCount !== null ? Math.floor(balanceCount) : null,
+    derived_unit_cost_toman: derivedUnitCost,
     lines,
     patterns,
     error: firstError,
   };
+}
+
+async function resolveAutoUnitCostToman(): Promise<number | null> {
+  if (cachedDerivedTariff && Date.now() - cachedDerivedTariff.fetchedAt < 10 * 60 * 1000) {
+    return cachedDerivedTariff.unitCostToman;
+  }
+  const cfg = getFarazRuntimeConfig();
+  if (!cfg.configured) return null;
+  const balRes = await farazFetch('/ws/v1/account/balance', { method: 'GET', timeoutMs: 5000 });
+  if (!balRes.ok) return null;
+  const balance = parseBalanceResponse(balRes.data);
+  const balanceCount = parseBalanceCountResponse(balRes.data);
+  if (balance !== null && balanceCount !== null && balanceCount > 0) {
+    const derived = Math.max(1, Math.round(balance / balanceCount));
+    cachedDerivedTariff = { unitCostToman: derived, fetchedAt: Date.now() };
+    return derived;
+  }
+  return null;
 }
 
 async function resolveLineNumber(settings: SmsSettingsConfig): Promise<string> {
@@ -521,7 +597,13 @@ export interface SmsDispatchResult {
   skipped?: boolean;
   mode: SmsSendMode;
   line_number: string;
+  pattern_code?: string;
+  rendered_text?: string;
+  sms_pages?: number;
+  estimated_cost_toman?: number;
+  duration_ms?: number;
   provider_ref?: string;
+  provider_response?: string;
   error?: string;
   log_id: number;
 }
@@ -536,6 +618,8 @@ export async function dispatchRecruitmentSms(
     forceEnabled?: boolean;
     overrideMode?: SmsSendMode;
     overridePatternCode?: string;
+    overrideLineNumber?: string;
+    overridePatternVarMap?: Record<string, string>;
   }
 ): Promise<SmsDispatchResult> {
   const settings = getSmsSettingsRow(db);
@@ -549,13 +633,18 @@ export async function dispatchRecruitmentSms(
           enabled: true,
           send_mode_override: 'default' as const,
           pattern_code: options?.overridePatternCode || '',
-          pattern_var_map: {},
+          pattern_var_map: options?.overridePatternVarMap || {},
           text_template: options?.customText || 'پیامک آزمایشی سامانه استخدام شرکت دستوا (فراز اس‌ام‌اس)',
         };
 
   const renderedText = options?.customText
     ? renderSmsTemplate(options.customText, variables)
     : renderSmsTemplate(templateCfg.text_template, variables);
+  const smsPages = calculateSmsPages(renderedText);
+  const effectiveUnitCost =
+    settings.unit_cost_toman > 0
+      ? settings.unit_cost_toman
+      : cachedDerivedTariff?.unitCostToman || FALLBACK_UNIT_COST_TOMAN;
 
   if (!mobVal.valid) {
     const logId = logSmsAttempt(db, {
@@ -570,7 +659,17 @@ export async function dispatchRecruitmentSms(
       provider_response: '',
       error_message: mobVal.message || 'شماره موبایل گیرنده معتبر نیست.',
     });
-    return { sent: false, mode: settings.send_mode, line_number: settings.line_number, error: mobVal.message, log_id: logId };
+    return {
+      sent: false,
+      mode: settings.send_mode,
+      line_number: settings.line_number,
+      rendered_text: renderedText,
+      sms_pages: smsPages,
+      estimated_cost_toman: 0,
+      duration_ms: 0,
+      error: mobVal.message,
+      log_id: logId,
+    };
   }
 
   if (!options?.forceEnabled && (!settings.sms_enabled || !templateCfg.enabled)) {
@@ -588,10 +687,23 @@ export async function dispatchRecruitmentSms(
         ? 'ارسال پیامک در تنظیمات سامانه غیرفعال است.'
         : 'ارسال پیامک برای این رویداد غیرفعال شده است.',
     });
-    return { sent: false, skipped: true, mode: settings.send_mode, line_number: settings.line_number, log_id: logId };
+    return {
+      sent: false,
+      skipped: true,
+      mode: settings.send_mode,
+      line_number: settings.line_number,
+      rendered_text: renderedText,
+      sms_pages: smsPages,
+      estimated_cost_toman: 0,
+      duration_ms: 0,
+      log_id: logId,
+    };
   }
 
-  const lineNumber = await resolveLineNumber(settings);
+  const lineNumber =
+    options?.overrideLineNumber && options.overrideLineNumber.trim()
+      ? toEnglishDigits(options.overrideLineNumber).trim()
+      : await resolveLineNumber(settings);
   const desiredMode: SmsSendMode =
     options?.overrideMode ||
     (templateCfg.send_mode_override !== 'default' ? templateCfg.send_mode_override : settings.send_mode);
@@ -601,10 +713,11 @@ export async function dispatchRecruitmentSms(
   const effectiveMode: SmsSendMode = desiredMode === 'pattern' && patternCode.length > 0 ? 'pattern' : 'text';
 
   let apiRes: { ok: boolean; status: number; data: unknown; rawText: string; error?: string };
+  const t0 = Date.now();
 
   if (effectiveMode === 'pattern') {
     const attributes: Record<string, string> = {};
-    const varMap = templateCfg.pattern_var_map || {};
+    const varMap = options?.overridePatternVarMap || templateCfg.pattern_var_map || {};
     const mapEntries = Object.entries(varMap);
     if (mapEntries.length > 0) {
       for (const [patternVar, sourceVar] of mapEntries) {
@@ -643,6 +756,7 @@ export async function dispatchRecruitmentSms(
     });
   }
 
+  const durationMs = Date.now() - t0;
   const providerRef = apiRes.ok ? extractProviderRef(apiRes.data) : '';
   const logId = logSmsAttempt(db, {
     event_type: eventType,
@@ -661,7 +775,13 @@ export async function dispatchRecruitmentSms(
     sent: apiRes.ok,
     mode: effectiveMode,
     line_number: lineNumber,
+    pattern_code: effectiveMode === 'pattern' ? patternCode : '',
+    rendered_text: renderedText,
+    sms_pages: smsPages,
+    estimated_cost_toman: apiRes.ok ? smsPages * effectiveUnitCost : 0,
+    duration_ms: durationMs,
     provider_ref: providerRef,
+    provider_response: apiRes.rawText,
     error: apiRes.ok ? undefined : apiRes.error,
     log_id: logId,
   };
@@ -1020,7 +1140,11 @@ export async function sendCustomTemplateSms(
   db: D1DatabaseAdapter,
   templateId: number,
   recipientMobile: string,
-  variables: Record<string, string>
+  variables: Record<string, string>,
+  options?: {
+    overrideMode?: SmsSendMode;
+    overrideLineNumber?: string;
+  }
 ): Promise<SmsDispatchResult & { notFound?: boolean }> {
   const tpl = getCustomSmsTemplateById(db, templateId);
   if (!tpl) {
@@ -1038,6 +1162,11 @@ export async function sendCustomTemplateSms(
   const cleanMobile = toEnglishDigits(recipientMobile || '').trim();
   const mobVal = validateIranianMobile(cleanMobile);
   const renderedText = renderSmsTemplate(tpl.text_template || tpl.title, variables);
+  const smsPages = calculateSmsPages(renderedText);
+  const effectiveUnitCost =
+    settings.unit_cost_toman > 0
+      ? settings.unit_cost_toman
+      : cachedDerivedTariff?.unitCostToman || FALLBACK_UNIT_COST_TOMAN;
   const eventLabel = `CUSTOM:${tpl.trigger_key}`;
 
   if (!mobVal.valid) {
@@ -1057,16 +1186,25 @@ export async function sendCustomTemplateSms(
       sent: false,
       mode: tpl.send_mode,
       line_number: settings.line_number,
+      rendered_text: renderedText,
+      sms_pages: smsPages,
+      estimated_cost_toman: 0,
+      duration_ms: 0,
       error: mobVal.message,
       log_id: logId,
     };
   }
 
-  const lineNumber = await resolveLineNumber(settings);
+  const lineNumber =
+    options?.overrideLineNumber && options.overrideLineNumber.trim()
+      ? toEnglishDigits(options.overrideLineNumber).trim()
+      : await resolveLineNumber(settings);
+  const desiredMode = options?.overrideMode || tpl.send_mode;
   const effectiveMode: SmsSendMode =
-    tpl.send_mode === 'pattern' && tpl.pattern_code.trim().length > 0 ? 'pattern' : 'text';
+    desiredMode === 'pattern' && tpl.pattern_code.trim().length > 0 ? 'pattern' : 'text';
 
   let apiRes: { ok: boolean; status: number; data: unknown; rawText: string; error?: string };
+  const t0 = Date.now();
 
   if (effectiveMode === 'pattern') {
     const attributes: Record<string, string> = {};
@@ -1108,6 +1246,7 @@ export async function sendCustomTemplateSms(
     });
   }
 
+  const durationMs = Date.now() - t0;
   const providerRef = apiRes.ok ? extractProviderRef(apiRes.data) : '';
   const logId = logSmsAttempt(db, {
     event_type: eventLabel,
@@ -1126,7 +1265,13 @@ export async function sendCustomTemplateSms(
     sent: apiRes.ok,
     mode: effectiveMode,
     line_number: lineNumber,
+    pattern_code: effectiveMode === 'pattern' ? tpl.pattern_code.trim() : '',
+    rendered_text: renderedText,
+    sms_pages: smsPages,
+    estimated_cost_toman: apiRes.ok ? smsPages * effectiveUnitCost : 0,
+    duration_ms: durationMs,
     provider_ref: providerRef,
+    provider_response: apiRes.rawText,
     error: apiRes.ok ? undefined : apiRes.error,
     log_id: logId,
   };
@@ -1269,4 +1414,209 @@ export async function retrySmsLogEntry(
     log_id: newLogId,
   };
 }
+
+// ============================================================================
+// HIGH-LEVEL SMS ANALYTICS DASHBOARD AGGREGATOR
+// ============================================================================
+
+const JALALI_MONTH_NAMES: Record<string, string> = {
+  '01': 'فروردین',
+  '02': 'اردیبهشت',
+  '03': 'خرداد',
+  '04': 'تیر',
+  '05': 'مرداد',
+  '06': 'شهریور',
+  '07': 'مهر',
+  '08': 'آبان',
+  '09': 'آذر',
+  '10': 'دی',
+  '11': 'بهمن',
+  '12': 'اسفند',
+};
+
+const ANALYTICS_EVENT_LABELS: Record<string, string> = {
+  OTP: 'کد تایید (OTP)',
+  REGISTRATION_SUCCESS: 'ثبت‌نام موفق',
+  STATUS_AND_INTERVIEW: 'تغییر وضعیت / مصاحبه',
+  ADMIN_NEW_APPLICANT: 'اطلاع‌رسانی مدیر',
+  TEST_SMS: 'پیامک آزمایشی',
+};
+
+function resolveAnalyticsEventLabel(eventType: string): string {
+  if (ANALYTICS_EVENT_LABELS[eventType]) return ANALYTICS_EVENT_LABELS[eventType];
+  if (eventType.startsWith('CUSTOM:')) {
+    const key = eventType.slice('CUSTOM:'.length);
+    const found = CUSTOM_SMS_TRIGGER_OPTIONS.find((o) => o.key === key);
+    return found ? `سفارشی: ${found.label}` : 'قالب سفارشی';
+  }
+  return eventType || 'سایر';
+}
+
+function extractJalaliMonthKey(jalaliDateTime: string): string {
+  const en = toEnglishDigits(jalaliDateTime || '').trim();
+  const match = en.match(/^(\d{4})\/(\d{1,2})/);
+  if (match) {
+    return `${match[1]}/${match[2].padStart(2, '0')}`;
+  }
+  const fallback = toEnglishDigits(getCurrentJalaliDateTime());
+  const fbMatch = fallback.match(/^(\d{4})\/(\d{1,2})/);
+  return fbMatch ? `${fbMatch[1]}/${fbMatch[2].padStart(2, '0')}` : '1405/08';
+}
+
+function formatJalaliMonthLabel(monthKey: string): string {
+  const [yr, mo] = monthKey.split('/');
+  const monthName = JALALI_MONTH_NAMES[mo] || mo;
+  return `${monthName} ${toPersianDigits(yr || '')}`;
+}
+
+export async function getSmsAnalytics(db: D1DatabaseAdapter): Promise<SmsAnalyticsData> {
+  const settings = getSmsSettingsRow(db);
+  const autoUnitCost = await resolveAutoUnitCostToman();
+  const manualUnitCost = settings.unit_cost_toman;
+
+  let effectiveUnitCost = FALLBACK_UNIT_COST_TOMAN;
+  let tariffSource: 'manual' | 'auto' | 'fallback' = 'fallback';
+  if (manualUnitCost > 0) {
+    effectiveUnitCost = manualUnitCost;
+    tariffSource = 'manual';
+  } else if (autoUnitCost !== null && autoUnitCost > 0) {
+    effectiveUnitCost = autoUnitCost;
+    tariffSource = 'auto';
+  }
+
+  const allLogs = db
+    .prepare(
+      'SELECT event_type, send_mode, message_text, status, created_at_jalali FROM sms_logs ORDER BY id ASC'
+    )
+    .all<{
+      event_type: string;
+      send_mode: string;
+      message_text: string;
+      status: 'sent' | 'failed' | 'skipped';
+      created_at_jalali: string;
+    }>().results;
+
+  const currentMonthKey = extractJalaliMonthKey(getCurrentJalaliDateTime());
+
+  let total = 0;
+  let sent = 0;
+  let failed = 0;
+  let skipped = 0;
+  let totalPages = 0;
+
+  const monthMap = new Map<string, SmsMonthlyAnalyticsPoint>();
+  const eventMap = new Map<string, SmsEventAnalyticsPoint>();
+  const modeMap: Record<SmsSendMode, SmsModeAnalyticsPoint> = {
+    pattern: { mode: 'pattern', label: 'پترن سریع (Pattern)', total: 0, sent: 0, failed: 0 },
+    text: { mode: 'text', label: 'متن دلخواه (Text)', total: 0, sent: 0, failed: 0 },
+  };
+
+  for (const row of allLogs) {
+    total += 1;
+    const pages = row.status === 'sent' ? calculateSmsPages(row.message_text || '') : 0;
+    const spend = pages * effectiveUnitCost;
+
+    if (row.status === 'sent') {
+      sent += 1;
+      totalPages += pages;
+    } else if (row.status === 'failed') {
+      failed += 1;
+    } else {
+      skipped += 1;
+    }
+
+    // Monthly bucket
+    const mKey = extractJalaliMonthKey(row.created_at_jalali);
+    const mBucket = monthMap.get(mKey) || {
+      month_key: mKey,
+      month_label: formatJalaliMonthLabel(mKey),
+      total: 0,
+      sent: 0,
+      failed: 0,
+      pages: 0,
+      spend_toman: 0,
+    };
+    mBucket.total += 1;
+    if (row.status === 'sent') {
+      mBucket.sent += 1;
+      mBucket.pages += pages;
+      mBucket.spend_toman += spend;
+    } else if (row.status === 'failed') {
+      mBucket.failed += 1;
+    }
+    monthMap.set(mKey, mBucket);
+
+    // Event bucket
+    const evKey = row.event_type || 'TEST_SMS';
+    const evBucket = eventMap.get(evKey) || {
+      event_type: evKey,
+      label: resolveAnalyticsEventLabel(evKey),
+      total: 0,
+      sent: 0,
+      failed: 0,
+      pages: 0,
+      spend_toman: 0,
+    };
+    evBucket.total += 1;
+    if (row.status === 'sent') {
+      evBucket.sent += 1;
+      evBucket.pages += pages;
+      evBucket.spend_toman += spend;
+    } else if (row.status === 'failed') {
+      evBucket.failed += 1;
+    }
+    eventMap.set(evKey, evBucket);
+
+    // Mode bucket
+    const modeKey: SmsSendMode = row.send_mode === 'pattern' ? 'pattern' : 'text';
+    modeMap[modeKey].total += 1;
+    if (row.status === 'sent') modeMap[modeKey].sent += 1;
+    else if (row.status === 'failed') modeMap[modeKey].failed += 1;
+  }
+
+  // Ensure current month always appears in monthly_trend if there are any logs or for chart baseline
+  if (!monthMap.has(currentMonthKey)) {
+    monthMap.set(currentMonthKey, {
+      month_key: currentMonthKey,
+      month_label: formatJalaliMonthLabel(currentMonthKey),
+      total: 0,
+      sent: 0,
+      failed: 0,
+      pages: 0,
+      spend_toman: 0,
+    });
+  }
+
+  const monthlyTrend = Array.from(monthMap.values())
+    .sort((a, b) => a.month_key.localeCompare(b.month_key))
+    .slice(-12);
+
+  const currentMonthBucket = monthMap.get(currentMonthKey)!;
+  const attempted = sent + failed;
+  const deliveryRate = attempted > 0 ? Math.round((sent / attempted) * 100) : 100;
+
+  return {
+    overview: {
+      total,
+      sent,
+      failed,
+      skipped,
+      delivery_rate: deliveryRate,
+      total_pages: totalPages,
+      total_spend_toman: totalPages * effectiveUnitCost,
+      current_month_label: formatJalaliMonthLabel(currentMonthKey),
+      current_month_sent: currentMonthBucket.sent,
+      current_month_pages: currentMonthBucket.pages,
+      current_month_spend_toman: currentMonthBucket.spend_toman,
+      effective_unit_cost_toman: effectiveUnitCost,
+      tariff_source: tariffSource,
+      auto_unit_cost_toman: autoUnitCost,
+      manual_unit_cost_toman: manualUnitCost,
+    },
+    monthly_trend: monthlyTrend,
+    by_event: Array.from(eventMap.values()).sort((a, b) => b.total - a.total),
+    by_mode: [modeMap.pattern, modeMap.text],
+  };
+}
+
 

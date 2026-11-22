@@ -22,12 +22,15 @@ import {
   Lock,
   Sparkles,
   X,
+  BarChart3,
+  FlaskConical,
 } from 'lucide-react';
 import {
   CUSTOM_SMS_TRIGGER_OPTIONS,
   CustomSmsTemplateRecord,
   CustomSmsTriggerKey,
   FarazProviderStatus,
+  SmsAnalyticsData,
   SmsEventKey,
   SmsLogRecord,
   SmsLogsSummary,
@@ -36,8 +39,10 @@ import {
   SmsTemplateConfig,
 } from '../types/recruitment.ts';
 import { toPersianDigits } from '../utils/validation.ts';
+import { SmsAnalyticsDashboardTab } from './SmsAnalyticsDashboardTab.tsx';
+import { SmsTestSandboxTab } from './SmsTestSandboxTab.tsx';
 
-type SmsSubTab = 'CONNECTION' | 'TEMPLATES' | 'LOGS';
+type SmsSubTab = 'DASHBOARD' | 'TEST' | 'CONNECTION' | 'TEMPLATES' | 'LOGS';
 
 type TemplateSelection =
   | { kind: 'system'; key: SmsEventKey }
@@ -203,9 +208,9 @@ function createEmptyDraft(): CustomTemplateDraft {
 }
 
 export const SmsSettingsView: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<SmsSubTab>('CONNECTION');
+  const [activeTab, setActiveTab] = useState<SmsSubTab>('DASHBOARD');
 
-  // Core SMS Settings & Provider status
+  // Core SMS Settings, Provider status & Analytics
   const [settings, setSettings] = useState<SmsSettingsConfig | null>(null);
   const [connectionInfo, setConnectionInfo] = useState<{
     configured: boolean;
@@ -215,18 +220,11 @@ export const SmsSettingsView: React.FC = () => {
   } | null>(null);
   const [provider, setProvider] = useState<FarazProviderStatus | null>(null);
   const [loadingProvider, setLoadingProvider] = useState(false);
+  const [analytics, setAnalytics] = useState<SmsAnalyticsData | null>(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
 
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsToast, setSettingsToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
-
-  // Global Test SMS state (Connection Tab)
-  const [testMobile, setTestMobile] = useState('');
-  const [testEvent, setTestEvent] = useState<SmsEventKey | 'TEST_SMS'>('TEST_SMS');
-  const [testCustomText, setTestCustomText] = useState(
-    'پیامک آزمایشی اتصال سامانه استخدام شرکت دستوا به وب‌سرویس فراز اس‌ام‌اس'
-  );
-  const [testSending, setTestSending] = useState(false);
-  const [testFeedback, setTestFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Interactive Template Editor (CRUD) State
   const [customTemplates, setCustomTemplates] = useState<CustomSmsTemplateRecord[]>([]);
@@ -321,11 +319,25 @@ export const SmsSettingsView: React.FC = () => {
     }
   }, [logStatusFilter, logEventFilter, logSearch]);
 
+  const fetchAnalytics = useCallback(async () => {
+    setLoadingAnalytics(true);
+    try {
+      const res = await fetch('/api/admin/sms/analytics');
+      const data = await res.json();
+      if (data.analytics) setAnalytics(data.analytics);
+    } catch {
+      // ignore transient error
+    } finally {
+      setLoadingAnalytics(false);
+    }
+  }, []);
+
   useEffect(() => {
     fetchSettings();
     fetchProviderStatus();
     fetchCustomTemplates();
-  }, [fetchSettings, fetchProviderStatus, fetchCustomTemplates]);
+    fetchAnalytics();
+  }, [fetchSettings, fetchProviderStatus, fetchCustomTemplates, fetchAnalytics]);
 
   useEffect(() => {
     fetchLogs();
@@ -404,37 +416,22 @@ export const SmsSettingsView: React.FC = () => {
     }
   };
 
-  const handleSendTestSms = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setTestSending(true);
-    setTestFeedback(null);
+  const handleSaveTariff = async (unitCostToman: number): Promise<{ ok: boolean; error?: string }> => {
     try {
-      const res = await fetch('/api/admin/sms/test', {
-        method: 'POST',
+      const res = await fetch('/api/admin/sms/settings', {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          mobile: testMobile,
-          event_type: testEvent,
-          custom_text: testCustomText,
-        }),
+        body: JSON.stringify({ unit_cost_toman: unitCostToman }),
       });
       const data = await res.json();
-      if (res.ok && data.success) {
-        setTestFeedback({
-          type: 'success',
-          text: `پیامک آزمایشی با موفقیت ارسال شد (روش: ${data.result?.mode === 'pattern' ? 'پترن' : 'متن دلخواه'} · خط: ${data.result?.line_number || 'پیش‌فرض'}${data.result?.provider_ref ? ` · کد پیگیری: ${data.result.provider_ref}` : ''}).`,
-        });
-      } else {
-        setTestFeedback({
-          type: 'error',
-          text: data.error || data.result?.error || 'ارسال پیامک آزمایشی ناموفق بود.',
-        });
+      if (res.ok && data.settings) {
+        setSettings(data.settings);
+        await fetchAnalytics();
+        return { ok: true };
       }
-      fetchLogs();
+      return { ok: false, error: data.error || 'خطا در ذخیره تعرفه پیامک.' };
     } catch {
-      setTestFeedback({ type: 'error', text: 'خطا در ارتباط با سرور برای ارسال پیامک آزمایشی.' });
-    } finally {
-      setTestSending(false);
+      return { ok: false, error: 'خطا در برقراری ارتباط با سرور.' };
     }
   };
 
@@ -545,6 +542,7 @@ export const SmsSettingsView: React.FC = () => {
         });
       }
       fetchLogs();
+      fetchAnalytics();
     } catch {
       setTemplateToast({ type: 'error', text: 'خطا در برقراری ارتباط با سرور برای تست قالب.' });
     } finally {
@@ -569,7 +567,7 @@ export const SmsSettingsView: React.FC = () => {
           text: data.error || data.result?.error || 'ارسال مجدد پیامک ناموفق بود.',
         });
       }
-      await fetchLogs();
+      await Promise.all([fetchLogs(), fetchAnalytics()]);
     } catch {
       setLogToast({ type: 'error', text: 'خطا در برقراری ارتباط با سرور جهت ارسال مجدد.' });
     } finally {
@@ -746,7 +744,7 @@ export const SmsSettingsView: React.FC = () => {
           </div>
         </div>
 
-        {/* 3 Clean Functional Tabs */}
+        {/* 5 Clean Functional Tabs */}
         <div
           role="tablist"
           aria-label="بخش‌های تنظیمات پیامک"
@@ -755,16 +753,49 @@ export const SmsSettingsView: React.FC = () => {
           <button
             type="button"
             role="tab"
+            aria-selected={activeTab === 'DASHBOARD'}
+            onClick={() => {
+              setActiveTab('DASHBOARD');
+              fetchAnalytics();
+            }}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeTab === 'DASHBOARD'
+                ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-xs'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <BarChart3 className="w-3.5 h-3.5" />
+            <span>داشبورد و آمار</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
+            aria-selected={activeTab === 'TEST'}
+            onClick={() => setActiveTab('TEST')}
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+              activeTab === 'TEST'
+                ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-xs'
+                : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
+            }`}
+          >
+            <FlaskConical className="w-3.5 h-3.5" />
+            <span>تست ارسال پیامک</span>
+          </button>
+
+          <button
+            type="button"
+            role="tab"
             aria-selected={activeTab === 'CONNECTION'}
             onClick={() => setActiveTab('CONNECTION')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'CONNECTION'
                 ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-xs'
                 : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             <Sliders className="w-3.5 h-3.5" />
-            <span>پیکربندی اتصال و 2FA</span>
+            <span>اتصال و 2FA</span>
           </button>
 
           <button
@@ -772,7 +803,7 @@ export const SmsSettingsView: React.FC = () => {
             role="tab"
             aria-selected={activeTab === 'TEMPLATES'}
             onClick={() => setActiveTab('TEMPLATES')}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'TEMPLATES'
                 ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-xs'
                 : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
@@ -793,14 +824,14 @@ export const SmsSettingsView: React.FC = () => {
               setActiveTab('LOGS');
               fetchLogs();
             }}
-            className={`flex items-center gap-2 px-3.5 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap cursor-pointer ${
+            className={`flex items-center gap-1.5 px-3 py-2 rounded-md text-xs font-bold transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
               activeTab === 'LOGS'
                 ? 'bg-white dark:bg-slate-900 text-blue-600 shadow-xs'
                 : 'text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white'
             }`}
           >
             <ListChecks className="w-3.5 h-3.5" />
-            <span>گزارش تحویل پیامک‌ها</span>
+            <span>گزارش تحویل</span>
             <span className="text-[11px] opacity-75 tabular-nums">
               ({toPersianDigits(logsSummary.total)})
             </span>
@@ -809,7 +840,49 @@ export const SmsSettingsView: React.FC = () => {
       </div>
 
       {/* ===================================================================== */}
-      {/* TAB 1: CONNECTION, 2FA & TEST SMS                                     */}
+      {/* TAB 1: HIGH-LEVEL SMS ANALYTICS DASHBOARD                             */}
+      {/* ===================================================================== */}
+      {activeTab === 'DASHBOARD' && (
+        <SmsAnalyticsDashboardTab
+          analytics={analytics}
+          loadingAnalytics={loadingAnalytics}
+          provider={provider}
+          loadingProvider={loadingProvider}
+          onRefresh={() => {
+            fetchAnalytics();
+            fetchProviderStatus();
+          }}
+          onSaveTariff={handleSaveTariff}
+          onNavigateTab={(tab) => setActiveTab(tab)}
+        />
+      )}
+
+      {/* ===================================================================== */}
+      {/* TAB 2: DEDICATED SMS TEST SANDBOX                                     */}
+      {/* ===================================================================== */}
+      {activeTab === 'TEST' && (
+        <SmsTestSandboxTab
+          settings={settings}
+          provider={provider}
+          customTemplates={customTemplates}
+          effectiveUnitCostToman={
+            analytics?.overview.effective_unit_cost_toman ||
+            (settings.unit_cost_toman > 0 ? settings.unit_cost_toman : provider?.derived_unit_cost_toman || 197)
+          }
+          onRefreshAfterSend={() => {
+            fetchLogs();
+            fetchAnalytics();
+            fetchProviderStatus();
+          }}
+          onNavigateLogs={() => {
+            setActiveTab('LOGS');
+            fetchLogs();
+          }}
+        />
+      )}
+
+      {/* ===================================================================== */}
+      {/* TAB 3: CONNECTION & 2FA CONFIGURATION                                 */}
       {/* ===================================================================== */}
       {activeTab === 'CONNECTION' && (
         <div className="space-y-6">
@@ -1164,95 +1237,25 @@ export const SmsSettingsView: React.FC = () => {
             </section>
           </form>
 
-          {/* Live Test SMS Panel */}
-          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
-            <div className="border-b border-slate-200 dark:border-slate-800 pb-3">
+          {/* Shortcut to Dedicated SMS Test Sandbox Tab */}
+          <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-5 flex flex-wrap items-center justify-between gap-4">
+            <div className="space-y-0.5">
               <h3 className="text-sm font-extrabold text-slate-900 dark:text-white flex items-center gap-2">
-                <Send className="w-4 h-4 text-blue-600" />
-                <span>ارسال پیامک آزمایشی زنده (فراز اس‌ام‌اس)</span>
+                <FlaskConical className="w-4 h-4 text-blue-600" />
+                <span>نیاز به آزمایش اتصال، رندر متغیرها و مشاهده پاسخ JSON دارید؟</span>
               </h3>
-              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
-                بررسی عملکرد واقعی خط فرستنده، کد پترن یا متن دلخواه پیش از فعال‌سازی عمومی.
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                از آزمایشگاه اختصاصی تست پیامک برای ارسال نمونه با هر قالب (سیستمی، سفارشی یا آزاد) استفاده کنید.
               </p>
             </div>
-
-            {testFeedback && (
-              <div
-                className={`rounded-lg border px-4 py-3 text-xs font-bold flex items-center gap-2 ${
-                  testFeedback.type === 'success'
-                    ? 'border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 text-emerald-700 dark:text-emerald-300'
-                    : 'border-rose-200 dark:border-rose-800 bg-rose-50 dark:bg-rose-950/40 text-rose-700 dark:text-rose-300'
-                }`}
-              >
-                {testFeedback.type === 'success' ? (
-                  <CheckCircle2 className="w-4 h-4 shrink-0" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 shrink-0" />
-                )}
-                <span>{testFeedback.text}</span>
-              </div>
-            )}
-
-            <form onSubmit={handleSendTestSms} className="grid grid-cols-1 md:grid-cols-12 gap-4 items-end text-xs">
-              <div className="md:col-span-3 space-y-1.5">
-                <label className="block font-bold text-slate-700 dark:text-slate-300">شماره موبایل گیرنده</label>
-                <input
-                  type="tel"
-                  dir="ltr"
-                  maxLength={11}
-                  required
-                  value={testMobile}
-                  onChange={(e) => setTestMobile(e.target.value)}
-                  placeholder="09123456789"
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 font-mono text-left tabular-nums focus:border-blue-600 focus:outline-none"
-                />
-              </div>
-
-              <div className="md:col-span-3 space-y-1.5">
-                <label className="block font-bold text-slate-700 dark:text-slate-300">نوع پیامک آزمایشی</label>
-                <select
-                  value={testEvent}
-                  onChange={(e) => setTestEvent(e.target.value as SmsEventKey | 'TEST_SMS')}
-                  className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 font-semibold"
-                >
-                  <option value="TEST_SMS">متن آزاد آزمایشی</option>
-                  {EVENT_METADATA.map((ev) => (
-                    <option key={ev.key} value={ev.key}>
-                      قالب: {ev.title}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="md:col-span-4 space-y-1.5">
-                <label className="block font-bold text-slate-700 dark:text-slate-300">
-                  {testEvent === 'TEST_SMS' ? 'متن پیامک آزمایشی' : 'توضیحات'}
-                </label>
-                {testEvent === 'TEST_SMS' ? (
-                  <input
-                    type="text"
-                    value={testCustomText}
-                    onChange={(e) => setTestCustomText(e.target.value)}
-                    className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2.5 focus:border-blue-600 focus:outline-none"
-                  />
-                ) : (
-                  <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-3 py-2.5 text-slate-500">
-                    ارسال با مقادیر نمونه و تنظیمات ذخیره‌شده همین رویداد
-                  </div>
-                )}
-              </div>
-
-              <div className="md:col-span-2">
-                <button
-                  type="submit"
-                  disabled={testSending}
-                  className="w-full flex items-center justify-center gap-2 rounded-lg bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white px-4 py-2.5 font-bold transition-colors whitespace-nowrap cursor-pointer disabled:opacity-60"
-                >
-                  <Send className="w-3.5 h-3.5" />
-                  <span>{testSending ? 'در حال ارسال...' : 'ارسال تست'}</span>
-                </button>
-              </div>
-            </form>
+            <button
+              type="button"
+              onClick={() => setActiveTab('TEST')}
+              className="flex items-center gap-2 rounded-lg bg-slate-900 dark:bg-blue-600 hover:bg-slate-800 dark:hover:bg-blue-700 text-white px-4 py-2.5 text-xs font-bold transition-colors whitespace-nowrap cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>ورود به آزمایشگاه تست پیامک</span>
+            </button>
           </section>
         </div>
       )}

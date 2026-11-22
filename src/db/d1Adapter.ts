@@ -80,18 +80,70 @@ class LocalD1Database implements D1DatabaseAdapter {
 
 let dbInstance: D1DatabaseAdapter | null = null;
 
+export function getResolvedDbPath(): string {
+  const envPath = (process.env.DB_PATH || '').trim();
+  if (envPath) {
+    return path.resolve(envPath);
+  }
+  return path.resolve(process.cwd(), '.data', 'dasteva_d1.sqlite');
+}
+
+function applyOrderedMigrations(adapter: D1DatabaseAdapter): { applied: string[]; skipped: string[] } {
+  const migrationsDir = path.resolve(process.cwd(), 'migrations');
+  const applied: string[] = [];
+  const skipped: string[] = [];
+
+  if (!fs.existsSync(migrationsDir)) {
+    return { applied, skipped };
+  }
+
+  adapter.exec(`
+    CREATE TABLE IF NOT EXISTS schema_migrations (
+      filename TEXT PRIMARY KEY,
+      applied_at TEXT NOT NULL
+    );
+  `);
+
+  const files = fs
+    .readdirSync(migrationsDir)
+    .filter((file) => file.endsWith('.sql'))
+    .sort((a, b) => a.localeCompare(b));
+
+  const appliedRows = adapter
+    .prepare('SELECT filename FROM schema_migrations')
+    .all<{ filename: string }>().results;
+  const appliedSet = new Set(appliedRows.map((row) => row.filename));
+
+  const rawSqlite = adapter.getRawSqlite();
+  for (const filename of files) {
+    if (appliedSet.has(filename)) {
+      skipped.push(filename);
+      continue;
+    }
+
+    const sqlPath = path.join(migrationsDir, filename);
+    const migrationSql = fs.readFileSync(sqlPath, 'utf-8');
+    const runSingleMigration = rawSqlite.transaction(() => {
+      adapter.exec(migrationSql);
+      adapter
+        .prepare('INSERT OR IGNORE INTO schema_migrations (filename, applied_at) VALUES (?, ?)')
+        .bind(filename, new Date().toISOString())
+        .run();
+    });
+    runSingleMigration();
+    applied.push(filename);
+  }
+
+  return { applied, skipped };
+}
+
 export function getD1Database(): D1DatabaseAdapter {
   if (dbInstance) return dbInstance;
 
-  const dbFilePath = path.resolve(process.cwd(), '.data', 'dasteva_d1.sqlite');
+  const dbFilePath = getResolvedDbPath();
   const adapter = new LocalD1Database(dbFilePath);
 
-  const migrationPath = path.resolve(process.cwd(), 'migrations', '0001_initial_schema.sql');
-  if (fs.existsSync(migrationPath)) {
-    const migrationSql = fs.readFileSync(migrationPath, 'utf-8');
-    adapter.exec(migrationSql);
-  }
-
+  applyOrderedMigrations(adapter);
   seedInitialDataIfNeeded(adapter);
   ensureDefaultSmsSettings(adapter);
   ensureDefaultCustomSmsTemplates(adapter);
@@ -99,7 +151,74 @@ export function getD1Database(): D1DatabaseAdapter {
   return adapter;
 }
 
+export function runDatabaseMigrations(): {
+  dbPath: string;
+  applied: string[];
+  skipped: string[];
+} {
+  const dbFilePath = getResolvedDbPath();
+  const adapter = dbInstance ?? new LocalD1Database(dbFilePath);
+  const { applied, skipped } = applyOrderedMigrations(adapter);
+  seedInitialDataIfNeeded(adapter);
+  ensureDefaultSmsSettings(adapter);
+  ensureDefaultCustomSmsTemplates(adapter);
+  if (!dbInstance) {
+    dbInstance = adapter;
+  }
+  return { dbPath: dbFilePath, applied, skipped };
+}
+
+export function checkDatabaseHealth(): {
+  ok: boolean;
+  dbPath: string;
+  tablesCount: number;
+  journalMode: string;
+  error?: string;
+} {
+  const dbPath = getResolvedDbPath();
+  try {
+    const adapter = getD1Database();
+    const raw = adapter.getRawSqlite();
+    const row = raw
+      .prepare("SELECT COUNT(*) as cnt FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+      .get() as { cnt: number } | undefined;
+    const journal = String(raw.pragma('journal_mode', { simple: true }) || 'unknown');
+    return {
+      ok: true,
+      dbPath,
+      tablesCount: Number(row?.cnt || 0),
+      journalMode: journal,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      dbPath,
+      tablesCount: 0,
+      journalMode: 'error',
+      error: err instanceof Error ? err.message : 'Database health check failed',
+    };
+  }
+}
+
+export function closeD1Database(): void {
+  if (!dbInstance) return;
+  try {
+    const raw = dbInstance.getRawSqlite();
+    raw.pragma('wal_checkpoint(TRUNCATE)');
+    raw.close();
+  } catch {
+    // Ignore close errors during shutdown
+  } finally {
+    dbInstance = null;
+  }
+}
+
 function ensureDefaultSmsSettings(db: D1DatabaseAdapter): void {
+  const cols = db.prepare('PRAGMA table_info(sms_settings)').all<{ name: string }>().results;
+  if (!cols.some((c) => c.name === 'unit_cost_toman')) {
+    db.exec('ALTER TABLE sms_settings ADD COLUMN unit_cost_toman REAL NOT NULL DEFAULT 0');
+  }
+
   const row = db.prepare('SELECT COUNT(*) as cnt FROM sms_settings').first<{ cnt: number }>();
   if (row && row.cnt > 0) return;
 
