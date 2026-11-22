@@ -3,7 +3,7 @@ import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { getD1Database } from './src/db/d1Adapter.ts';
+import { checkDatabaseHealth, closeD1Database, getD1Database } from './src/db/d1Adapter.ts';
 import {
   APPLICATION_STATUS_LIST,
   ApplicantSummaryRow,
@@ -25,6 +25,7 @@ import {
   dispatchRecruitmentSms,
   fetchFarazProviderStatus,
   getFarazRuntimeConfig,
+  getSmsAnalytics,
   getSmsLogsWithSummary,
   getSmsSettingsRow,
   listCustomSmsTemplates,
@@ -36,6 +37,7 @@ import {
 } from './src/services/farazSmsService.ts';
 
 const app = express();
+app.set('trust proxy', 1);
 app.use(express.json({ limit: '10mb' }));
 
 const db = getD1Database();
@@ -2184,12 +2186,19 @@ app.put('/api/admin/sms/settings', (req: Request, res: Response) => {
 });
 
 app.get('/api/admin/sms/provider-info', async (_req: Request, res: Response) => {
+  const t0 = Date.now();
   const status = await fetchFarazProviderStatus();
-  res.json({ provider: status });
+  res.json({ provider: status, duration_ms: Date.now() - t0 });
+});
+
+app.get('/api/admin/sms/analytics', async (_req: Request, res: Response) => {
+  const analytics = await getSmsAnalytics(db);
+  res.json({ analytics });
 });
 
 app.post('/api/admin/sms/test', async (req: Request, res: Response) => {
-  const { mobile, event_type, custom_text, mode } = req.body || {};
+  const { mobile, event_type, custom_text, mode, line_number, pattern_code, pattern_var_map, variables } =
+    req.body || {};
   const cleanMob = toEnglishDigits(String(mobile || '')).trim();
   const mobVal = validateIranianMobile(cleanMob);
   if (!mobVal.valid) {
@@ -2207,7 +2216,7 @@ app.post('/api/admin/sms/test', async (req: Request, res: Response) => {
   const resolvedEvent = allowedEvents.includes(event_type) ? (event_type as SmsEventKey | 'TEST_SMS') : 'TEST_SMS';
   const nowJalali = getCurrentJalaliDateTime();
 
-  const sampleVars: Record<string, string> = {
+  const defaultVars: Record<string, string> = {
     code: '482915',
     name: 'متقاضی آزمایشی',
     national_code: '0012345678',
@@ -2221,10 +2230,27 @@ app.post('/api/admin/sms/test', async (req: Request, res: Response) => {
     job_title: getSettingsRow().default_job_title,
   };
 
+  const sampleVars: Record<string, string> = {
+    ...defaultVars,
+    ...(variables && typeof variables === 'object' ? (variables as Record<string, string>) : {}),
+  };
+
   const result = await dispatchRecruitmentSms(db, resolvedEvent, cleanMob, sampleVars, {
-    customText: resolvedEvent === 'TEST_SMS' ? String(custom_text || 'پیامک آزمایشی اتصال سامانه استخدام شرکت دستوا به فراز اس‌ام‌اس') : undefined,
+    customText:
+      resolvedEvent === 'TEST_SMS'
+        ? String(custom_text || 'پیامک آزمایشی اتصال سامانه استخدام شرکت دستوا به فراز اس‌ام‌اس')
+        : undefined,
     forceEnabled: true,
     overrideMode: mode === 'pattern' || mode === 'text' ? mode : undefined,
+    overrideLineNumber: typeof line_number === 'string' && line_number.trim() ? line_number.trim() : undefined,
+    overridePatternCode:
+      resolvedEvent === 'TEST_SMS' && typeof pattern_code === 'string' && pattern_code.trim()
+        ? pattern_code.trim()
+        : undefined,
+    overridePatternVarMap:
+      resolvedEvent === 'TEST_SMS' && pattern_var_map && typeof pattern_var_map === 'object'
+        ? (pattern_var_map as Record<string, string>)
+        : undefined,
   });
 
   logAudit(
@@ -2306,7 +2332,7 @@ app.post('/api/admin/sms/templates/:id/send-test', async (req: Request, res: Res
     res.status(400).json({ error: 'شناسه قالب پیامک نامعتبر است.' });
     return;
   }
-  const { mobile, variables } = req.body || {};
+  const { mobile, variables, mode, line_number } = req.body || {};
   const cleanMob = toEnglishDigits(String(mobile || '')).trim();
   const mobVal = validateIranianMobile(cleanMob);
   if (!mobVal.valid) {
@@ -2330,7 +2356,10 @@ app.post('/api/admin/sms/templates/:id/send-test', async (req: Request, res: Res
     ...(variables && typeof variables === 'object' ? (variables as Record<string, string>) : {}),
   };
 
-  const result = await sendCustomTemplateSms(db, id, cleanMob, mergedVars);
+  const result = await sendCustomTemplateSms(db, id, cleanMob, mergedVars, {
+    overrideMode: mode === 'pattern' || mode === 'text' ? mode : undefined,
+    overrideLineNumber: typeof line_number === 'string' && line_number.trim() ? line_number.trim() : undefined,
+  });
   if (result.notFound) {
     res.status(404).json({ error: result.error });
     return;
@@ -2418,16 +2447,32 @@ app.get('/api/admin/backup/export', (_req: Request, res: Response) => {
   });
 });
 
+app.get('/api/health', (_req: Request, res: Response) => {
+  const dbHealth = checkDatabaseHealth();
+  const payload = {
+    status: dbHealth.ok ? 'ok' : 'degraded',
+    service: 'employment',
+    db: dbHealth.ok ? 'ok' : 'error',
+    tables_count: dbHealth.tablesCount,
+    journal_mode: dbHealth.journalMode,
+    node_env: process.env.NODE_ENV || 'development',
+    uptime_sec: Math.floor(process.uptime()),
+    timestamp: new Date().toISOString(),
+  };
+  res.status(dbHealth.ok ? 200 : 503).json(payload);
+});
+
 // ============================================================================
 // SERVER INITIALIZATION (Express + Vite Middleware on Port 3000 / process.env.PORT)
 // ============================================================================
 
 async function startServer() {
   const PORT = Number(process.env.PORT) || 3000;
+  const HOST = (process.env.HOST || '0.0.0.0').trim() || '0.0.0.0';
   const distPath = path.resolve(process.cwd(), 'dist');
 
   if (process.env.NODE_ENV === 'production' && fs.existsSync(distPath)) {
-    app.use(express.static(distPath));
+    app.use(express.static(distPath, { maxAge: '7d', index: false }));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
@@ -2439,9 +2484,24 @@ async function startServer() {
     app.use(vite.middlewares);
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Dasteva Recruitment Platform running at http://localhost:${PORT}`);
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Dasteva Recruitment Platform running at http://${HOST}:${PORT}`);
   });
+
+  const gracefulShutdown = (signal: string) => {
+    console.log(`[employment] Received ${signal}. Shutting down gracefully...`);
+    server.close(() => {
+      closeD1Database();
+      process.exit(0);
+    });
+    setTimeout(() => {
+      closeD1Database();
+      process.exit(1);
+    }, 10_000).unref();
+  };
+
+  process.once('SIGTERM', () => gracefulShutdown('SIGTERM'));
+  process.once('SIGINT', () => gracefulShutdown('SIGINT'));
 }
 
 startServer();
