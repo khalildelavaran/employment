@@ -352,6 +352,7 @@ sudo employment-update --rollback /var/backups/employment/backup-20261122-140500
 
 | نشانه / خطا | علت محتمل | راه‌حل عملیاتی |
 | :--- | :--- | :--- |
+| توقف یا قفل‌شدن `git clone` در مرحله ۶ (`Cloning into '/opt/employment/app'...`) | مسدود یا فریز شدن ترافیک `git-upload-pack` روی پورت `22` در شبکه دیتاسنتر ایران | نسخه جدید اسکریپت به صورت خودکار از `ssh.github.com` روی پورت `443` استفاده می‌کند (`--github-ssh-port 443`). در صورت استفاده از اسکریپت قبلی، `HostName ssh.github.com` و `Port 443` را در `/etc/employment/ssh/config` قرار دهید |
 | `Permission denied (publickey)` هنگام نصب یا آپدیت | کلید عمومی در GitHub Deploy Keys ثبت نشده یا حذف شده است | محتوای `sudo cat /etc/employment/ssh/deploy_key.pub` را بررسی و در بخش Deploy Keys مخزن ثبت کنید؛ سپس تست بگیرید: `sudo ssh -F /etc/employment/ssh/config -T git@github.com` |
 | خطای `NODE_MODULE_VERSION` یا `better_sqlite3.node` هنگام استارت | تغییر نسخه Node.js پس از نصب `node_modules` | بازسازی باینری بومی: `sudo -u employment npm --prefix /opt/employment/app rebuild better-sqlite3 && sudo systemctl restart employment` |
 | خطای `502 Bad Gateway` در Nginx | سرویس `employment` خاموش است یا روی پورت دیگری گوش می‌دهد | وضعیت سرویس را بررسی کنید (`sudo systemctl status employment`)، پورت `PORT` در `/etc/employment/employment.env` را با `proxy_pass` در `/etc/nginx/sites-available/employment` تطبیق دهید و لاگ را بخوانید (`sudo journalctl -u employment -n 50`) |

@@ -428,13 +428,26 @@ main() {
   fi
 
   git config --system --add safe.directory "${APP_DIR}" 2>/dev/null || true
-  local git_ssh_cmd="ssh -F ${SSH_CONFIG_PATH} -o BatchMode=yes"
+
+  # Ensure [ssh.github.com]:443 host key is pinned in known_hosts
+  local ssh_dir
+  ssh_dir="$(dirname "${SSH_CONFIG_PATH}")"
+  local known_hosts_file="${ssh_dir}/known_hosts"
+  if [[ -f "${known_hosts_file}" ]] && ! grep -q '^\[ssh\.github\.com\]:443 ' "${known_hosts_file}" 2>/dev/null; then
+    echo "[ssh.github.com]:443 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" >> "${known_hosts_file}"
+  fi
+
+  local git_ssh_cmd="ssh -F ${SSH_CONFIG_PATH} -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
 
   local current_commit remote_commit
   current_commit="$(git -C "${APP_DIR}" rev-parse HEAD)"
 
   log_info "Fetching latest commits from GitHub (branch: ${REPO_BRANCH})..."
-  GIT_SSH_COMMAND="${git_ssh_cmd}" git -C "${APP_DIR}" fetch --prune origin "${REPO_BRANCH}"
+  if ! timeout 120 env GIT_SSH_COMMAND="${git_ssh_cmd}" git -C "${APP_DIR}" fetch --progress --prune origin "${REPO_BRANCH}"; then
+    log_warn "Git fetch timed out or failed with current SSH config; switching ${SSH_CONFIG_PATH} to ssh.github.com:443 and retrying..."
+    sed -i 's/HostName github.com/HostName ssh.github.com\n  Port 443/' "${SSH_CONFIG_PATH}" 2>/dev/null || true
+    timeout 120 env GIT_SSH_COMMAND="${git_ssh_cmd}" git -C "${APP_DIR}" fetch --progress --prune origin "${REPO_BRANCH}"
+  fi
   remote_commit="$(git -C "${APP_DIR}" rev-parse "origin/${REPO_BRANCH}")"
 
   log_info "Current installed commit : ${current_commit:0:8}"

@@ -29,6 +29,10 @@ BACKUP_DIR="${BACKUP_DIR:-/var/backups/employment}"
 
 REPO_SSH="${REPO_SSH:-git@github.com:khalildelavaran/employment.git}"
 REPO_BRANCH="${REPO_BRANCH:-main}"
+GITHUB_SSH_MODE="${GITHUB_SSH_MODE:-auto}" # auto (443 first, then 22), 443, or 22
+GITHUB_SSH_HOST="ssh.github.com"
+GITHUB_SSH_PORT="443"
+GIT_TIMEOUT_SEC="${GIT_TIMEOUT_SEC:-180}"
 APP_HOST="${APP_HOST:-127.0.0.1}"
 APP_PORT="${APP_PORT:-3000}"
 
@@ -57,6 +61,7 @@ Options:
   --backup-dir PATH        Backups directory (default: /var/backups/employment)
   --repo-ssh URL           GitHub SSH URL (default: git@github.com:khalildelavaran/employment.git)
   --branch NAME            Git branch to deploy (default: main)
+  --github-ssh-port MODE   GitHub SSH transport: auto (443 then 22), 443, or 22 (default: auto)
   --port PORT              Internal Node.js port (default: 3000)
   --domain DOMAIN          Public domain for Nginx (default: _ for IP/catch-all)
   --enable-ssl             Provision HTTPS certificate via Let's Encrypt Certbot
@@ -87,6 +92,7 @@ while [[ $# -gt 0 ]]; do
     --backup-dir)      BACKUP_DIR="$2"; shift 2 ;;
     --repo-ssh)        REPO_SSH="$2"; shift 2 ;;
     --branch)          REPO_BRANCH="$2"; shift 2 ;;
+    --github-ssh-port) GITHUB_SSH_MODE="$2"; shift 2 ;;
     --port)            APP_PORT="$2"; shift 2 ;;
     --domain)          DOMAIN="$2"; shift 2 ;;
     --email)           SSL_EMAIL="$2"; shift 2 ;;
@@ -387,19 +393,90 @@ stage_directories_and_user() {
 }
 
 # ------------------------------------------------------------------------------
-# Stage 5: Configure Private GitHub SSH Deploy Key
+# Stage 5: Configure Private GitHub SSH Deploy Key (Defaulting to Port 443)
 # ------------------------------------------------------------------------------
+write_github_ssh_config() {
+  local host="$1"
+  local port="$2"
+  GITHUB_SSH_HOST="${host}"
+  GITHUB_SSH_PORT="${port}"
+
+  cat > "${SSH_CONFIG_PATH}" <<EOF
+Host github.com
+  HostName ${host}
+  Port ${port}
+  User git
+  IdentityFile ${SSH_KEY_PATH}
+  IdentitiesOnly yes
+  UserKnownHostsFile ${SSH_KNOWN_HOSTS}
+  StrictHostKeyChecking accept-new
+  ConnectTimeout 15
+  ServerAliveInterval 15
+  ServerAliveCountMax 3
+EOF
+  chmod 600 "${SSH_CONFIG_PATH}"
+  chown root:root "${SSH_CONFIG_PATH}"
+  log_info "Configured GitHub SSH endpoint -> ${host}:${port}"
+}
+
+seed_github_known_hosts() {
+  touch "${SSH_KNOWN_HOSTS}"
+  # Official GitHub ED25519 host key fingerprint: SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU
+  local gh_ed25519="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+
+  if ! grep -q '^\[ssh\.github\.com\]:443 ' "${SSH_KNOWN_HOSTS}" 2>/dev/null; then
+    ssh-keyscan -T 10 -p 443 -t ed25519,rsa ssh.github.com >> "${SSH_KNOWN_HOSTS}" 2>/dev/null || true
+    if ! grep -q '^\[ssh\.github\.com\]:443 ' "${SSH_KNOWN_HOSTS}" 2>/dev/null; then
+      echo "[ssh.github.com]:443 ${gh_ed25519}" >> "${SSH_KNOWN_HOSTS}"
+    fi
+  fi
+
+  if ! grep -q '^github\.com ' "${SSH_KNOWN_HOSTS}" 2>/dev/null; then
+    ssh-keyscan -T 10 -p 22 -t ed25519,rsa github.com >> "${SSH_KNOWN_HOSTS}" 2>/dev/null || true
+    if ! grep -q '^github\.com ' "${SSH_KNOWN_HOSTS}" 2>/dev/null; then
+      echo "github.com ${gh_ed25519}" >> "${SSH_KNOWN_HOSTS}"
+    fi
+  fi
+
+  chmod 644 "${SSH_KNOWN_HOSTS}"
+  chown root:root "${SSH_KNOWN_HOSTS}"
+  log_info "Pinned GitHub SSH host keys (ssh.github.com:443 & github.com:22) in ${SSH_KNOWN_HOSTS}."
+}
+
+select_github_ssh_endpoint() {
+  case "${GITHUB_SSH_MODE}" in
+    443)
+      write_github_ssh_config "ssh.github.com" "443"
+      ;;
+    22)
+      write_github_ssh_config "github.com" "22"
+      ;;
+    auto|*)
+      # Prefer ssh.github.com:443 because ISPs/datacenters often throttle or freeze git-upload-pack on TCP/22
+      if timeout 8 bash -c 'cat < /dev/null > /dev/tcp/ssh.github.com/443' 2>/dev/null; then
+        write_github_ssh_config "ssh.github.com" "443"
+      elif timeout 8 bash -c 'cat < /dev/null > /dev/tcp/github.com/22' 2>/dev/null; then
+        log_warn "ssh.github.com:443 unreachable; falling back to github.com:22."
+        write_github_ssh_config "github.com" "22"
+      else
+        log_warn "Could not pre-verify TCP 443/22 via /dev/tcp; defaulting to ssh.github.com:443."
+        write_github_ssh_config "ssh.github.com" "443"
+      fi
+      ;;
+  esac
+}
+
 test_github_ssh() {
   local output=""
   set +e
-  output="$(ssh -F "${SSH_CONFIG_PATH}" -o BatchMode=yes -T git@github.com 2>&1)"
+  output="$(timeout 20 ssh -F "${SSH_CONFIG_PATH}" -o BatchMode=yes -o ConnectTimeout=12 -T git@github.com 2>&1)"
   local rc=$?
   set -e
   # GitHub returns exit code 1 with "successfully authenticated" when SSH key is valid
   if echo "${output}" | grep -qi "successfully authenticated"; then
     return 0
   fi
-  log_warn "GitHub SSH auth check returned code ${rc}: ${output}"
+  log_warn "GitHub SSH auth check (${GITHUB_SSH_HOST}:${GITHUB_SSH_PORT}) returned code ${rc}: ${output}"
   return 1
 }
 
@@ -418,25 +495,8 @@ stage_github_ssh() {
     log_info "Reusing existing SSH Deploy Key at ${SSH_KEY_PATH}."
   fi
 
-  # Seed GitHub host keys cleanly
-  if [[ ! -f "${SSH_KNOWN_HOSTS}" ]] || ! grep -q "github.com" "${SSH_KNOWN_HOSTS}" 2>/dev/null; then
-    ssh-keyscan -t ed25519,rsa github.com > "${SSH_KNOWN_HOSTS}" 2>/dev/null
-    chmod 644 "${SSH_KNOWN_HOSTS}"
-    chown root:root "${SSH_KNOWN_HOSTS}"
-    log_info "Pinned github.com SSH host keys in ${SSH_KNOWN_HOSTS}."
-  fi
-
-  cat > "${SSH_CONFIG_PATH}" <<EOF
-Host github.com
-  HostName github.com
-  User git
-  IdentityFile ${SSH_KEY_PATH}
-  IdentitiesOnly yes
-  UserKnownHostsFile ${SSH_KNOWN_HOSTS}
-  StrictHostKeyChecking yes
-EOF
-  chmod 600 "${SSH_CONFIG_PATH}"
-  chown root:root "${SSH_CONFIG_PATH}"
+  seed_github_known_hosts
+  select_github_ssh_endpoint
 
   if ! test_github_ssh; then
     echo ""
@@ -472,32 +532,63 @@ EOF
       log_warn "Still not authorized. Please confirm the key was saved in GitHub Deploy Keys and try again."
     done
   else
-    log_info "GitHub SSH Deploy Key is already authorized."
+    log_info "GitHub SSH Deploy Key is already authorized via ${GITHUB_SSH_HOST}:${GITHUB_SSH_PORT}."
   fi
 }
 
 # ------------------------------------------------------------------------------
-# Stage 6: Clone or Sync Source Code from GitHub
+# Stage 6: Clone or Sync Source Code from GitHub (with Timeout & Fallback)
 # ------------------------------------------------------------------------------
+run_git_network_op() {
+  local git_ssh_cmd="ssh -F ${SSH_CONFIG_PATH} -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+  if timeout "${GIT_TIMEOUT_SEC}" env GIT_SSH_COMMAND="${git_ssh_cmd}" "$@"; then
+    return 0
+  fi
+
+  # Automatic fallback between 443 and 22 if in 'auto' mode
+  if [[ "${GITHUB_SSH_MODE}" == "auto" ]]; then
+    if [[ "${GITHUB_SSH_PORT}" == "443" ]]; then
+      log_warn "Git operation timed out or failed over ssh.github.com:443; retrying over github.com:22..."
+      write_github_ssh_config "github.com" "22"
+    else
+      log_warn "Git operation timed out or failed over github.com:22; retrying over ssh.github.com:443..."
+      write_github_ssh_config "ssh.github.com" "443"
+    fi
+    git_ssh_cmd="ssh -F ${SSH_CONFIG_PATH} -o BatchMode=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
+    timeout "${GIT_TIMEOUT_SEC}" env GIT_SSH_COMMAND="${git_ssh_cmd}" "$@"
+    return $?
+  fi
+
+  return 1
+}
+
 stage_fetch_source() {
   stage_start "6/10 — Fetching Employment Source Code from GitHub (${REPO_BRANCH})"
 
-  local git_ssh_cmd="ssh -F ${SSH_CONFIG_PATH} -o BatchMode=yes"
   git config --system --add safe.directory "${APP_DIR}" 2>/dev/null || true
 
-  if [[ -d "${APP_DIR}/.git" ]]; then
+  # Verify git-upload-pack works before cloning/fetching
+  log_info "Verifying git-upload-pack stream via ${GITHUB_SSH_HOST}:${GITHUB_SSH_PORT}..."
+  run_git_network_op git ls-remote --heads "${REPO_SSH}" "${REPO_BRANCH}" >/dev/null
+
+  if [[ -d "${APP_DIR}/.git" ]] && git -C "${APP_DIR}" rev-parse --git-dir >/dev/null 2>&1; then
     log_info "Existing Git repository found in ${APP_DIR}. Fetching latest '${REPO_BRANCH}'..."
-    GIT_SSH_COMMAND="${git_ssh_cmd}" git -C "${APP_DIR}" remote set-url origin "${REPO_SSH}"
-    GIT_SSH_COMMAND="${git_ssh_cmd}" git -C "${APP_DIR}" fetch --prune origin "${REPO_BRANCH}"
+    git -C "${APP_DIR}" remote set-url origin "${REPO_SSH}"
+    run_git_network_op git -C "${APP_DIR}" fetch --progress --prune origin "${REPO_BRANCH}"
     git -C "${APP_DIR}" checkout -B "${REPO_BRANCH}" "origin/${REPO_BRANCH}"
   else
+    # Clean up partial/interrupted clone directory if it only has an incomplete .git folder
+    if [[ -d "${APP_DIR}/.git" ]]; then
+      log_warn "Removing incomplete .git directory from a previously interrupted clone in ${APP_DIR}..."
+      rm -rf "${APP_DIR}/.git"
+    fi
     # Ensure APP_DIR is empty before fresh clone
     if [[ -n "$(ls -A "${APP_DIR}" 2>/dev/null || true)" ]]; then
-      log_error "${APP_DIR} is not empty and is not a Git repository. Refusing to overwrite existing files."
+      log_error "${APP_DIR} is not empty and is not a valid Git repository. Refusing to overwrite existing files."
       exit 1
     fi
-    log_info "Cloning ${REPO_SSH} (branch: ${REPO_BRANCH}) into ${APP_DIR}..."
-    GIT_SSH_COMMAND="${git_ssh_cmd}" git clone --branch "${REPO_BRANCH}" --single-branch "${REPO_SSH}" "${APP_DIR}"
+    log_info "Cloning ${REPO_SSH} (branch: ${REPO_BRANCH}) into ${APP_DIR} via ${GITHUB_SSH_HOST}:${GITHUB_SSH_PORT}..."
+    run_git_network_op git clone --progress --branch "${REPO_BRANCH}" --single-branch "${REPO_SSH}" "${APP_DIR}"
   fi
 
   local deployed_commit
