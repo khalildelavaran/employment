@@ -1,5 +1,4 @@
 import React, { useState } from 'react';
-import * as XLSX from 'xlsx';
 import {
   Users,
   FilePlus,
@@ -437,71 +436,109 @@ export const ApplicantsTableView: React.FC<ApplicantsTableViewProps> = ({
     }
   };
 
-  const handleExportToExcel = () => {
-    const targetList =
-      selectedIds.length > 0
-        ? items.filter((item) => selectedIds.includes(item.application_id))
-        : items;
 
-    const rowsToExport = targetList.map((row, index) => ({
-      'ردیف': index + 1,
-      'نام و نام خانوادگی': row.full_name,
-      'کد ملی': row.national_code,
-      'شماره موبایل': row.mobile,
-      'جنسیت': row.gender,
-      'تاریخ تولد': row.birth_date_jalali,
-      'سن (سال)': row.calculated_age,
-      'وضعیت شرایط سنی': row.is_age_qualified ? 'واجد شرایط' : row.age_warning_text || 'خارج از محدوده',
-      'وضعیت تأهل': row.marital_status,
-      'وضعیت نظام وظیفه': row.military_status || '—',
-      'مقطع تحصیلی': row.primary_degree,
-      'رشته تحصیلی': row.primary_major,
-      'دانشگاه محل تحصیل': row.primary_university,
-      'شهر محل سکونت': row.city,
-      'منطقه / محله': row.district,
-      'سابقه کار (ماه)': row.total_experience_months,
-      'حقوق پیشنهادی (تومان)': row.proposed_salary_toman,
-      'نحوه آشنایی': row.acquaintance_source,
-      'وضعیت فعلی استخدام': row.status_title,
-      'وضعیت مدارک حضوری': row.in_person_docs_status,
-      'امتیاز ارزیابی / مصاحبه': row.avg_evaluation_score || row.avg_interview_score || 0,
-      'تاریخ ثبت درخواست': row.submitted_at_jalali,
-    }));
+const handleExportToExcel = async () => {
+  const ExcelJS = await import('exceljs');
 
-    const worksheet = XLSX.utils.json_to_sheet(rowsToExport);
-    worksheet['!cols'] = [
-      { wch: 6 },
-      { wch: 22 },
-      { wch: 14 },
-      { wch: 15 },
-      { wch: 10 },
-      { wch: 13 },
-      { wch: 10 },
-      { wch: 24 },
-      { wch: 12 },
-      { wch: 18 },
-      { wch: 16 },
-      { wch: 22 },
-      { wch: 22 },
-      { wch: 15 },
-      { wch: 18 },
-      { wch: 14 },
-      { wch: 20 },
-      { wch: 18 },
-      { wch: 22 },
-      { wch: 18 },
-      { wch: 18 },
-      { wch: 20 },
-    ];
-    if (!worksheet['!views']) {
-      worksheet['!views'] = [];
-    }
-    worksheet['!views'].push({ rightToLeft: true });
+  const targetList =
+    selectedIds.length > 0
+      ? items.filter((item) =>
+          selectedIds.includes(item.application_id)
+        )
+      : items;
 
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, 'متقاضیان استخدام');
-    XLSX.writeFile(workbook, `dasteva_applicants_export_${Date.now()}.xlsx`);
-  };
+  const rowsToExport = targetList.map((row, index) => ({
+    'ردیف': index + 1,
+    'نام و نام خانوادگی': row.full_name,
+    'کد ملی': row.national_code,
+    'شماره موبایل': row.mobile,
+    'جنسیت': row.gender,
+    'تاریخ تولد': row.birth_date_jalali,
+    'سن (سال)': row.calculated_age,
+    'وضعیت شرایط سنی': row.is_age_qualified
+      ? 'واجد شرایط'
+      : row.age_warning_text || 'خارج از محدوده',
+    'وضعیت تأهل': row.marital_status,
+    'وضعیت نظام وظیفه': row.military_status || '—',
+    'مقطع تحصیلی': row.primary_degree,
+    'رشته تحصیلی': row.primary_major,
+    'دانشگاه محل تحصیل': row.primary_university,
+    'شهر محل سکونت': row.city,
+    'منطقه / محله': row.district,
+    'سابقه کار (ماه)': row.total_experience_months,
+    'حقوق پیشنهادی (تومان)': row.proposed_salary_toman,
+    'نحوه آشنایی': row.acquaintance_source,
+    'وضعیت فعلی استخدام': row.status_title,
+    'وضعیت مدارک حضوری': row.in_person_docs_status,
+    'امتیاز ارزیابی / مصاحبه':
+      row.avg_evaluation_score || row.avg_interview_score || 0,
+    'تاریخ ثبت درخواست': row.submitted_at_jalali,
+  }));
+
+  const headers = [
+    'ردیف',
+    'نام و نام خانوادگی',
+    'کد ملی',
+    'شماره موبایل',
+    'جنسیت',
+    'تاریخ تولد',
+    'سن (سال)',
+    'وضعیت شرایط سنی',
+    'وضعیت تأهل',
+    'وضعیت نظام وظیفه',
+    'مقطع تحصیلی',
+    'رشته تحصیلی',
+    'دانشگاه محل تحصیل',
+    'شهر محل سکونت',
+    'منطقه / محله',
+    'سابقه کار (ماه)',
+    'حقوق پیشنهادی (تومان)',
+    'نحوه آشنایی',
+    'وضعیت فعلی استخدام',
+    'وضعیت مدارک حضوری',
+    'امتیاز ارزیابی / مصاحبه',
+    'تاریخ ثبت درخواست',
+  ];
+
+  const columnWidths = [
+    6, 22, 14, 15, 10, 13, 10, 24, 12, 18, 16,
+    22, 22, 15, 18, 14, 20, 18, 22, 18, 18, 20,
+  ];
+
+  const workbook = new ExcelJS.Workbook();
+
+  const worksheet = workbook.addWorksheet('متقاضیان استخدام', {
+    views: [{ rightToLeft: true }],
+  });
+
+  worksheet.columns = headers.map((header, index) => ({
+    header,
+    key: `column_${index}`,
+    width: columnWidths[index],
+  }));
+
+  rowsToExport.forEach((row) => {
+    worksheet.addRow(headers.map((header) => row[header as keyof typeof row] ?? ''));
+  });
+
+  const buffer = await workbook.xlsx.writeBuffer();
+
+  const blob = new Blob([new Uint8Array(buffer)], {
+    type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+  });
+
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+
+  link.href = url;
+  link.download = `dasteva_applicants_export_${Date.now()}.xlsx`;
+
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+};
 
   return (
     <div className="space-y-4">
@@ -1102,7 +1139,7 @@ export const WorkflowPipelineView: React.FC<{
                     <p className="text-xs text-slate-400 py-4 text-center">بدون متقاضی در این مرحله</p>
                   )}
                 </div>
-              </div>
+              </div>f
             </div>
           );
         })}
