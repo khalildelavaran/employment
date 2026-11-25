@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   LayoutDashboard,
   Users,
@@ -28,6 +28,7 @@ import {
   ShieldCheck,
   AlertCircle,
   MessageSquare,
+  User,
 } from 'lucide-react';
 import {
   ApplicantFullDossier,
@@ -138,9 +139,16 @@ export default function App() {
   const [admin2faCode, setAdmin2faCode] = useState('');
   const [admin2faResendSeconds, setAdmin2faResendSeconds] = useState(0);
   const [admin2faExpirySeconds, setAdmin2faExpirySeconds] = useState(0);
+  const lastAutoSubmittedAdmin2faRef = useRef('');
 
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(false);
   const [activeMenu, setActiveMenu] = useState<AdminMenuKey>('DASHBOARD');
+  const [orgLogoDataUrl, setOrgLogoDataUrl] = useState<string>('');
+  const [isAdminProfileOpen, setIsAdminProfileOpen] = useState<boolean>(false);
+  const [adminProfileMeta, setAdminProfileMeta] = useState<{
+    admin_mobile: string;
+    admin_2fa_enabled: boolean;
+  }>({ admin_mobile: '', admin_2fa_enabled: false });
 
   // Centralized Theme Preset State
   const [activeThemeId, setActiveThemeId] = useState<ThemePresetId>(initialThemeState.themeId);
@@ -238,6 +246,7 @@ export default function App() {
         setAdmin2faResendSeconds(Number(data.resend_after || 60));
         setAdmin2faExpirySeconds(Number(data.expires_in || 120));
         setAdmin2faCode('');
+        lastAutoSubmittedAdmin2faRef.current = '';
       } else if (res.ok && data.authenticated) {
         try {
           sessionStorage.setItem(ADMIN_AUTH_STORAGE_KEY, 'true');
@@ -256,8 +265,9 @@ export default function App() {
     }
   };
 
-  const handleAdminVerify2fa = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const verifyAdmin2faCode = async (rawCode: string) => {
+    const cleanCode = toEnglishDigits(rawCode).replace(/\D/g, '').slice(0, 6);
+    if (!admin2faChallengeId || cleanCode.length !== 6) return;
     setLoginError('');
     setIsLoggingIn(true);
     try {
@@ -266,7 +276,7 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           challenge_id: admin2faChallengeId,
-          code: toEnglishDigits(admin2faCode),
+          code: cleanCode,
         }),
       });
       const data = await res.json();
@@ -280,6 +290,7 @@ export default function App() {
         setLoginPassword('');
         setAdmin2faChallengeId('');
         setAdmin2faCode('');
+        lastAutoSubmittedAdmin2faRef.current = '';
       } else {
         setLoginError(data.error || 'کد تایید دومرحله‌ای صحیح نیست.');
       }
@@ -287,6 +298,30 @@ export default function App() {
       setLoginError('خطا در ارتباط با سرور برای بررسی کد تایید.');
     } finally {
       setIsLoggingIn(false);
+    }
+  };
+
+  const handleAdminVerify2fa = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await verifyAdmin2faCode(admin2faCode);
+  };
+
+  const handleAdmin2faInputChange = (rawVal: string) => {
+    const clean = toEnglishDigits(rawVal).replace(/\D/g, '').slice(0, 6);
+    setAdmin2faCode(clean);
+    if (loginError) setLoginError('');
+    if (clean.length < 6) {
+      lastAutoSubmittedAdmin2faRef.current = '';
+      return;
+    }
+    if (
+      clean.length === 6 &&
+      !isLoggingIn &&
+      admin2faChallengeId &&
+      lastAutoSubmittedAdmin2faRef.current !== clean
+    ) {
+      lastAutoSubmittedAdmin2faRef.current = clean;
+      void verifyAdmin2faCode(clean);
     }
   };
 
@@ -303,6 +338,7 @@ export default function App() {
         setAdmin2faResendSeconds(Number(data.resend_after || 60));
         setAdmin2faExpirySeconds(Number(data.expires_in || 120));
         setAdmin2faCode('');
+        lastAutoSubmittedAdmin2faRef.current = '';
       } else {
         setLoginError(data.error || 'ارسال مجدد کد تایید ناموفق بود.');
       }
@@ -319,11 +355,28 @@ export default function App() {
     } catch {
       // ignore storage error
     }
+    setIsAdminProfileOpen(false);
     setIsAdminAuthenticated(false);
     setLoginUsername('');
     setLoginPassword('');
     setAdmin2faChallengeId('');
     setAdmin2faCode('');
+  };
+
+  const handleOpenAdminProfile = async () => {
+    setIsAdminProfileOpen(true);
+    try {
+      const res = await fetch('/api/admin/sms/settings');
+      const data = await res.json();
+      if (data?.settings) {
+        setAdminProfileMeta({
+          admin_mobile: data.settings.admin_mobile || '',
+          admin_2fa_enabled: Boolean(data.settings.admin_2fa_enabled),
+        });
+      }
+    } catch {
+      // ignore transient error
+    }
   };
 
   // Apply active or preview theme tokens immediately to DOM
@@ -419,18 +472,23 @@ export default function App() {
       if (v && v !== 'ALL') queryParams.set(k, v);
     });
 
-    const [statsRes, listRes] = await Promise.all([
+    const [statsRes, listRes, settingsRes] = await Promise.all([
       fetch('/api/admin/dashboard-stats'),
       fetch(`/api/admin/applicants?${queryParams.toString()}`),
+      fetch('/api/admin/settings'),
     ]);
 
     const statsData = await statsRes.json();
     const listData = await listRes.json();
+    const settingsData = await settingsRes.json();
 
     if (statsData && statsData.cards) setDashboardStats(statsData);
     if (listData && Array.isArray(listData.items)) {
       setApplicants(listData.items);
       setTotalApplicants(listData.total || listData.items.length);
+    }
+    if (settingsData?.settings) {
+      setOrgLogoDataUrl(settingsData.settings.org_logo_data_url || '');
     }
   }, [filters]);
 
@@ -566,15 +624,19 @@ export default function App() {
                 <input
                   type="text"
                   inputMode="numeric"
+                  autoComplete="one-time-code"
                   dir="ltr"
                   maxLength={6}
                   autoFocus
                   value={admin2faCode}
-                  onChange={(e) => setAdmin2faCode(e.target.value)}
+                  onChange={(e) => handleAdmin2faInputChange(e.target.value)}
                   placeholder="• • • • • •"
                   required
                   className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3.5 py-3 text-center text-lg font-mono tracking-[0.5em] tabular-nums focus:border-blue-600 focus:outline-none"
                 />
+                <p className="text-[11px] text-slate-500 mt-1.5 text-center">
+                  پس از وارد کردن رقم ششم، تایید کد و ورود به‌صورت خودکار انجام می‌شود.
+                </p>
               </div>
 
               {loginError && (
@@ -590,7 +652,7 @@ export default function App() {
                 className="w-full flex items-center justify-center gap-2 rounded-xl bg-blue-600 py-3 text-xs font-extrabold text-white hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-60"
               >
                 <ShieldCheck className="w-4 h-4" />
-                <span>{isLoggingIn ? 'در حال بررسی کد...' : 'تایید کد و ورود به داشبورد'}</span>
+                <span>{isLoggingIn ? 'در حال بررسی خودکار کد...' : 'تایید کد و ورود به داشبورد'}</span>
               </button>
 
               <div className="flex items-center justify-between pt-1 text-xs">
@@ -609,6 +671,7 @@ export default function App() {
                   onClick={() => {
                     setAdmin2faChallengeId('');
                     setAdmin2faCode('');
+                    lastAutoSubmittedAdmin2faRef.current = '';
                     setLoginError('');
                   }}
                   className="font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
@@ -730,7 +793,7 @@ export default function App() {
             className="w-full flex items-center justify-center gap-2 rounded-lg border border-rose-500/40 px-3 py-2 text-xs font-bold text-rose-500 hover:bg-rose-500/10 transition-colors cursor-pointer whitespace-nowrap"
           >
             <LogOut className="w-3.5 h-3.5" />
-            <span>خروج از پنل مدیریت</span>
+            <span>خروج از حساب کاربری</span>
           </button>
         </div>
       </aside>
@@ -783,16 +846,32 @@ export default function App() {
             </span>
           </div>
 
-          {/* Zone 2: Single Administrator Badge */}
+          {/* Zone 2: Active Administrator Quick Profile Trigger */}
           <div className="hidden md:flex items-center gap-2 text-xs">
-            <span className="text-slate-500 whitespace-nowrap">کاربر فعال:</span>
-            <span className="font-bold text-slate-800 dark:text-slate-100">
-              مدیر سامانه (admin)
-            </span>
+            <button
+              type="button"
+              onClick={handleOpenAdminProfile}
+              className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-slate-200 dark:border-slate-800 hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors cursor-pointer"
+            >
+              <User className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400" />
+              <span className="text-slate-500 whitespace-nowrap">پروفایل:</span>
+              <span className="font-bold text-slate-800 dark:text-slate-100 whitespace-nowrap">
+                مدیر سامانه (admin)
+              </span>
+            </button>
           </div>
 
-          {/* Zone 3: Topbar "پوسته‌ها" Modal Trigger + Logout */}
-          <div className="flex items-center gap-2.5 shrink-0">
+          {/* Zone 3: Topbar Profile, Theme Modal & Logout */}
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={handleOpenAdminProfile}
+              className="md:hidden flex items-center gap-1.5 px-2.5 py-2 rounded-lg border border-slate-200 dark:border-slate-800 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-800 cursor-pointer"
+            >
+              <User className="w-3.5 h-3.5 text-blue-600" />
+              <span>پروفایل</span>
+            </button>
+
             <button
               type="button"
               onClick={() => setIsThemeModalOpen(true)}
@@ -803,16 +882,18 @@ export default function App() {
                 className="w-3 h-3 rounded-full inline-block shrink-0"
               />
               <Palette className="w-3.5 h-3.5 text-blue-600" />
-              <span>پوسته‌ها ({effectivePreset.persianName})</span>
+              <span className="hidden sm:inline">پوسته‌ها ({effectivePreset.persianName})</span>
+              <span className="sm:hidden">پوسته</span>
             </button>
 
             <button
               type="button"
               onClick={handleAdminLogout}
-              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-rose-600 border border-rose-200 dark:border-rose-800 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
             >
               <LogOut className="w-3.5 h-3.5" />
-              <span>خروج</span>
+              <span className="hidden sm:inline">خروج از حساب کاربری</span>
+              <span className="sm:hidden">خروج</span>
             </button>
           </div>
         </header>
@@ -950,6 +1031,11 @@ export default function App() {
         applicationId={activeDossierId}
         onClose={() => setActiveDossierId(null)}
         onUpdated={loadDashboardAndApplicants}
+        onDeleted={(deletedAppId) => {
+          setSelectedIds((prev) => prev.filter((id) => id !== deletedAppId));
+          setActiveDossierId(null);
+          loadDashboardAndApplicants();
+        }}
         onPrintSingle={(dossier) =>
           setPrintModal({
             isOpen: true,
@@ -976,7 +1062,99 @@ export default function App() {
         applicantsList={printModal.applicantsList}
         interviewsList={printModal.interviewsList}
         canViewEvaluations={true}
+        orgLogoDataUrl={orgLogoDataUrl}
       />
+
+      {/* Admin Profile Modal */}
+      {isAdminProfileOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="w-full max-w-md rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                  <User className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                    پروفایل مدیر سامانه
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    مدیر کل منابع انسانی و استخدام دستوا
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsAdminProfileOpen(false)}
+                aria-label="بستن پروفایل"
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-6 space-y-3 text-xs">
+              <div className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">نام کاربری:</span>
+                <strong className="font-mono text-slate-900 dark:text-white">admin</strong>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">نقش و سطح دسترسی:</span>
+                <strong className="text-slate-900 dark:text-white">مدیر سامانه (دسترسی کامل)</strong>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">ورود دومرحله‌ای پیامکی (2FA):</span>
+                <strong className={adminProfileMeta.admin_2fa_enabled ? 'text-emerald-600 dark:text-emerald-400' : 'text-slate-600 dark:text-slate-300'}>
+                  {adminProfileMeta.admin_2fa_enabled ? 'فعال' : 'غیرفعال'}
+                </strong>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-100 dark:border-slate-800">
+                <span className="text-slate-500 dark:text-slate-400">شماره موبایل مدیر:</span>
+                <strong className="tabular-nums text-slate-900 dark:text-white">
+                  {adminProfileMeta.admin_mobile ? toPersianDigits(adminProfileMeta.admin_mobile) : 'ثبت نشده'}
+                </strong>
+              </div>
+              <div className="flex items-center justify-between py-2">
+                <span className="text-slate-500 dark:text-slate-400">پوسته فعال:</span>
+                <strong className="text-slate-900 dark:text-white">{effectivePreset.persianName}</strong>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAdminProfileOpen(false);
+                    setActiveMenu('SMS_SETTINGS');
+                  }}
+                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-100 cursor-pointer"
+                >
+                  تنظیمات امنیت و پیامک
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsAdminProfileOpen(false);
+                    setActiveMenu('RECRUITMENT_SETTINGS');
+                  }}
+                  className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-100 cursor-pointer"
+                >
+                  تنظیمات سامانه
+                </button>
+              </div>
+              <button
+                type="button"
+                onClick={handleAdminLogout}
+                className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>خروج از حساب کاربری</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

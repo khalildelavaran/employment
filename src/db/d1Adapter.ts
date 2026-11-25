@@ -144,6 +144,7 @@ export function getD1Database(): D1DatabaseAdapter {
   const adapter = new LocalD1Database(dbFilePath);
 
   applyOrderedMigrations(adapter);
+  ensureRecruitmentSettingsSchema(adapter);
   seedInitialDataIfNeeded(adapter);
   ensureDefaultSmsSettings(adapter);
   ensureDefaultCustomSmsTemplates(adapter);
@@ -159,6 +160,7 @@ export function runDatabaseMigrations(): {
   const dbFilePath = getResolvedDbPath();
   const adapter = dbInstance ?? new LocalD1Database(dbFilePath);
   const { applied, skipped } = applyOrderedMigrations(adapter);
+  ensureRecruitmentSettingsSchema(adapter);
   seedInitialDataIfNeeded(adapter);
   ensureDefaultSmsSettings(adapter);
   ensureDefaultCustomSmsTemplates(adapter);
@@ -210,6 +212,18 @@ export function closeD1Database(): void {
     // Ignore close errors during shutdown
   } finally {
     dbInstance = null;
+  }
+}
+
+function ensureRecruitmentSettingsSchema(db: D1DatabaseAdapter): void {
+  const cols = db.prepare('PRAGMA table_info(recruitment_settings)').all<{ name: string }>().results;
+  if (cols.length > 0 && !cols.some((c) => c.name === 'org_logo_data_url')) {
+    db.exec("ALTER TABLE recruitment_settings ADD COLUMN org_logo_data_url TEXT NOT NULL DEFAULT ''");
+  }
+  if (cols.length > 0 && !cols.some((c) => c.name === 'enabled_registration_steps_json')) {
+    db.exec(
+      "ALTER TABLE recruitment_settings ADD COLUMN enabled_registration_steps_json TEXT NOT NULL DEFAULT '[1,2,3,4,5,6,7,8,9]'"
+    );
   }
 }
 

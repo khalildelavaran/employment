@@ -7,8 +7,11 @@ import { checkDatabaseHealth, closeD1Database, getD1Database } from './src/db/d1
 import {
   APPLICATION_STATUS_LIST,
   ApplicantSummaryRow,
+  DEFAULT_ENABLED_REGISTRATION_STEPS,
+  REGISTRATION_STEPS_META,
   RecruitmentSettings,
   SmsEventKey,
+  normalizeEnabledRegistrationSteps,
 } from './src/types/recruitment.ts';
 import {
   calculateAgeFromJalali,
@@ -89,11 +92,23 @@ function getSettingsRow(): RecruitmentSettings {
       default_job_title: 'کارمند اداری و دفتری (ساعت کاری ۸ الی ۱۴)',
       default_theme: 'azure-professional',
       custom_theme: {},
+      org_logo_data_url: '',
+      enabled_registration_steps: [...DEFAULT_ENABLED_REGISTRATION_STEPS],
       company_districts: ['مرکز شهر شوشتر', 'فرهنگیان', 'کوی نیرو', 'دروازه', 'دولت‌آباد', 'کوی بوستان', 'سایر مناطق'],
       settings_history: [],
       updated_by: ADMIN_ACTOR_NAME,
       updated_at_jalali: '۱۴۰۵/۰۸/۲۰ - ۱۰:۳۰',
     };
+  }
+  let parsedEnabledSteps = DEFAULT_ENABLED_REGISTRATION_STEPS;
+  try {
+    if (row.enabled_registration_steps_json) {
+      parsedEnabledSteps = normalizeEnabledRegistrationSteps(
+        JSON.parse(String(row.enabled_registration_steps_json))
+      );
+    }
+  } catch {
+    parsedEnabledSteps = [...DEFAULT_ENABLED_REGISTRATION_STEPS];
   }
   return {
     id: Number(row.id),
@@ -106,6 +121,8 @@ function getSettingsRow(): RecruitmentSettings {
     default_job_title: String(row.default_job_title),
     default_theme: String(row.default_theme || 'azure-professional'),
     custom_theme: JSON.parse(String(row.custom_theme_json || '{}')),
+    org_logo_data_url: String(row.org_logo_data_url || ''),
+    enabled_registration_steps: parsedEnabledSteps,
     company_districts: JSON.parse(String(row.company_districts_json || '[]')),
     settings_history: JSON.parse(String(row.settings_history_json || '[]')),
     updated_by: String(row.updated_by),
@@ -167,6 +184,7 @@ function buildApplicantSummaryList(): ApplicantSummaryRow[] {
         ra.proposed_salary_toman,
         ra.status_code,
         st.title as status_title,
+        COALESCE(st.is_terminal, 0) as is_terminal,
         ra.in_person_docs_status,
         ra.submitted_at_jalali,
         ra.completion_percent,
@@ -220,6 +238,7 @@ function buildApplicantSummaryList(): ApplicantSummaryRow[] {
       proposed_salary_toman: Number(r.proposed_salary_toman || 0),
       status_code: String(r.status_code) as ApplicantSummaryRow['status_code'],
       status_title: String(r.status_title || 'ثبت درخواست جدید'),
+      is_terminal: Number(r.is_terminal || 0),
       in_person_docs_status: String(r.in_person_docs_status || 'دریافت نشده') as ApplicantSummaryRow['in_person_docs_status'],
       has_resume: Boolean(resumeText.trim()),
       avg_evaluation_score: Number(r.avg_evaluation_score || 0),
@@ -335,6 +354,9 @@ app.get('/api/public/config', (_req: Request, res: Response) => {
     default_job_title: settings.default_job_title,
     default_theme: settings.default_theme || 'azure-professional',
     custom_theme: settings.custom_theme || {},
+    org_logo_data_url: settings.org_logo_data_url || '',
+    enabled_registration_steps:
+      settings.enabled_registration_steps || [...DEFAULT_ENABLED_REGISTRATION_STEPS],
     company_districts: settings.company_districts,
     allow_submit_without_resume: Boolean(settings.allow_submit_without_resume),
     age_limit_enabled: Boolean(settings.age_limit_enabled),
@@ -557,6 +579,9 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
       return;
     }
 
+    const enabledSteps = normalizeEnabledRegistrationSteps(settings.enabled_registration_steps);
+    const isStepEnabled = (stepNum: number) => enabledSteps.includes(stepNum);
+
     const militaryStatus = gender === 'مرد' ? String(payload.military_status || '') : '';
     const nowJalali = getCurrentJalaliDateTime();
 
@@ -565,9 +590,20 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
 
     const saveTx = raw.transaction(() => {
       const existing = db
-        .prepare('SELECT id FROM applicants WHERE national_code = ?')
+        .prepare(
+          `SELECT id, city, district, district_input_mode, full_address, has_work_experience, resume_text
+           FROM applicants WHERE national_code = ?`
+        )
         .bind(cleanNat)
-        .first<{ id: number }>();
+        .first<{
+          id: number;
+          city: string;
+          district: string;
+          district_input_mode: string;
+          full_address: string;
+          has_work_experience: number;
+          resume_text: string;
+        }>();
 
       let applicantId: number;
       if (!existing) {
@@ -593,25 +629,50 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
             String(payload.father_alive_status || 'در قید حیات'),
             String(payload.father_job || '').trim(),
             cleanMob,
-            String(payload.city || '').trim(),
-            String(payload.district || '').trim(),
+            isStepEnabled(3) ? String(payload.city || '').trim() : '',
+            isStepEnabled(3) ? String(payload.district || '').trim() : '',
             payload.district_input_mode === 'manual' ? 'manual' : 'list',
-            String(payload.full_address || '').trim(),
-            payload.has_work_experience ? 1 : 0,
-            String(payload.resume_text || '').trim()
+            isStepEnabled(3) ? String(payload.full_address || '').trim() : '',
+            isStepEnabled(5) && payload.has_work_experience ? 1 : 0,
+            isStepEnabled(8) ? String(payload.resume_text || '').trim() : ''
           )
           .run();
         applicantId = ins.meta.last_row_id;
       } else {
         applicantId = existing.id;
         const existingApp = db
-          .prepare('SELECT id, is_submitted FROM recruitment_applications WHERE applicant_id = ?')
+          .prepare(
+            `SELECT ra.id, ra.is_submitted, ra.status_code, COALESCE(st.is_terminal, 0) as is_terminal
+             FROM recruitment_applications ra
+             LEFT JOIN application_statuses st ON st.code = ra.status_code
+             WHERE ra.applicant_id = ?`
+          )
           .bind(applicantId)
-          .first<{ id: number; is_submitted: number }>();
+          .first<{ id: number; is_submitted: number; status_code: string; is_terminal: number }>();
 
-        if (existingApp && existingApp.is_submitted === 1 && !payload.allow_edit_before_submit) {
-          throw new Error('این درخواست قبلاً ثبت نهایی شده است و قابل ویرایش نیست.');
+        if (existingApp && existingApp.is_submitted === 1 && existingApp.is_terminal === 1) {
+          throw new Error('پرونده شما در وضعیت نهایی (استخدام، رد یا انصراف) قرار دارد و دیگر قابل ویرایش نیست.');
         }
+
+        // Preserve existing fields for disabled steps so prior applicant records remain intact in admin dossiers
+        const nextCity = isStepEnabled(3) ? String(payload.city || '').trim() : existing.city;
+        const nextDistrict = isStepEnabled(3) ? String(payload.district || '').trim() : existing.district;
+        const nextDistrictMode = isStepEnabled(3)
+          ? payload.district_input_mode === 'manual'
+            ? 'manual'
+            : 'list'
+          : existing.district_input_mode || 'list';
+        const nextFullAddress = isStepEnabled(3)
+          ? String(payload.full_address || '').trim()
+          : existing.full_address;
+        const nextHasWork = isStepEnabled(5)
+          ? payload.has_work_experience
+            ? 1
+            : 0
+          : existing.has_work_experience;
+        const nextResumeText = isStepEnabled(8)
+          ? String(payload.resume_text || '').trim()
+          : existing.resume_text;
 
         db.prepare(
           `UPDATE applicants SET
@@ -634,19 +695,19 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
             String(payload.father_alive_status || 'در قید حیات'),
             String(payload.father_job || '').trim(),
             cleanMob,
-            String(payload.city || '').trim(),
-            String(payload.district || '').trim(),
-            payload.district_input_mode === 'manual' ? 'manual' : 'list',
-            String(payload.full_address || '').trim(),
-            payload.has_work_experience ? 1 : 0,
-            String(payload.resume_text || '').trim(),
+            nextCity,
+            nextDistrict,
+            nextDistrictMode,
+            nextFullAddress,
+            nextHasWork,
+            nextResumeText,
             applicantId
           )
           .run();
       }
 
-      // Sync Education (1:N)
-      if (Array.isArray(payload.education)) {
+      // Sync Education (1:N) — only mutate when Step 2 is enabled
+      if (isStepEnabled(2) && Array.isArray(payload.education)) {
         db.prepare('DELETE FROM applicant_education WHERE applicant_id = ?').bind(applicantId).run();
         payload.education.forEach((edu: Record<string, unknown>, idx: number) => {
           if (edu.major || edu.university_name) {
@@ -670,32 +731,34 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
         });
       }
 
-      // Sync Work Experiences (1:N)
-      db.prepare('DELETE FROM applicant_work_experiences WHERE applicant_id = ?').bind(applicantId).run();
-      if (payload.has_work_experience && Array.isArray(payload.work_experiences)) {
-        payload.work_experiences.forEach((w: Record<string, unknown>) => {
-          if (w.company_name || w.job_title) {
-            db.prepare(
-              `INSERT INTO applicant_work_experiences (
-                applicant_id, company_name, job_title, duration_text, duration_months, responsibilities, leaving_reason, is_relevant
-              ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
-            )
-              .bind(
-                applicantId,
-                String(w.company_name || '').trim(),
-                String(w.job_title || '').trim(),
-                String(w.duration_text || '').trim(),
-                Number(w.duration_months || 12),
-                String(w.responsibilities || '').trim(),
-                String(w.leaving_reason || '').trim()
+      // Sync Work Experiences (1:N) — only mutate when Step 5 is enabled
+      if (isStepEnabled(5)) {
+        db.prepare('DELETE FROM applicant_work_experiences WHERE applicant_id = ?').bind(applicantId).run();
+        if (payload.has_work_experience && Array.isArray(payload.work_experiences)) {
+          payload.work_experiences.forEach((w: Record<string, unknown>) => {
+            if (w.company_name || w.job_title) {
+              db.prepare(
+                `INSERT INTO applicant_work_experiences (
+                  applicant_id, company_name, job_title, duration_text, duration_months, responsibilities, leaving_reason, is_relevant
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 1)`
               )
-              .run();
-          }
-        });
+                .bind(
+                  applicantId,
+                  String(w.company_name || '').trim(),
+                  String(w.job_title || '').trim(),
+                  String(w.duration_text || '').trim(),
+                  Number(w.duration_months || 12),
+                  String(w.responsibilities || '').trim(),
+                  String(w.leaving_reason || '').trim()
+                )
+                .run();
+            }
+          });
+        }
       }
 
-      // Sync Relatives / Contacts (1:N)
-      if (Array.isArray(payload.contacts)) {
+      // Sync Relatives / Contacts (1:N) — only mutate when Step 4 is enabled
+      if (isStepEnabled(4) && Array.isArray(payload.contacts)) {
         db.prepare('DELETE FROM applicant_contacts WHERE applicant_id = ?').bind(applicantId).run();
         payload.contacts.forEach((c: Record<string, unknown>) => {
           if (c.full_name || c.mobile) {
@@ -715,12 +778,24 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
 
       // Upsert recruitment_applications
       const existingApp = db
-        .prepare('SELECT id FROM recruitment_applications WHERE applicant_id = ?')
+        .prepare(
+          'SELECT id, is_submitted, acquaintance_source, acquaintance_note, proposed_salary_toman FROM recruitment_applications WHERE applicant_id = ?'
+        )
         .bind(applicantId)
-        .first<{ id: number }>();
+        .first<{
+          id: number;
+          is_submitted: number;
+          acquaintance_source: string;
+          acquaintance_note: string;
+          proposed_salary_toman: number;
+        }>();
 
       const step = Math.min(9, Math.max(1, Number(payload.current_step || 1)));
-      const completionPercent = Math.min(95, Math.round((step / 9) * 100));
+      const activeIdx = Math.max(0, enabledSteps.indexOf(step));
+      const completionPercent = Math.min(
+        95,
+        Math.round(((activeIdx + 1) / Math.max(1, enabledSteps.length)) * 100)
+      );
 
       if (!existingApp) {
         const appIns = db
@@ -734,9 +809,9 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
             applicantId,
             step,
             completionPercent,
-            String(payload.acquaintance_source || ''),
-            String(payload.acquaintance_note || ''),
-            Number(payload.proposed_salary_toman || 0),
+            isStepEnabled(6) ? String(payload.acquaintance_source || '') : '',
+            isStepEnabled(6) ? String(payload.acquaintance_note || '') : '',
+            isStepEnabled(7) ? Number(payload.proposed_salary_toman || 0) : 0,
             nowJalali,
             nowJalali
           )
@@ -752,6 +827,17 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
           .run();
       } else {
         resultApplicationId = existingApp.id;
+        const isAlreadySubmitted = existingApp.is_submitted === 1;
+        const nextAcqSource = isStepEnabled(6)
+          ? String(payload.acquaintance_source || '')
+          : existingApp.acquaintance_source;
+        const nextAcqNote = isStepEnabled(6)
+          ? String(payload.acquaintance_note || '')
+          : existingApp.acquaintance_note;
+        const nextSalary = isStepEnabled(7)
+          ? Number(payload.proposed_salary_toman || 0)
+          : existingApp.proposed_salary_toman;
+
         db.prepare(
           `UPDATE recruitment_applications SET
             current_step = ?, completion_percent = ?, acquaintance_source = ?, acquaintance_note = ?,
@@ -759,11 +845,11 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
            WHERE id = ?`
         )
           .bind(
-            step,
-            completionPercent,
-            String(payload.acquaintance_source || ''),
-            String(payload.acquaintance_note || ''),
-            Number(payload.proposed_salary_toman || 0),
+            isAlreadySubmitted ? 9 : step,
+            isAlreadySubmitted ? 100 : completionPercent,
+            nextAcqSource,
+            nextAcqNote,
+            nextSalary,
             nowJalali,
             resultApplicationId
           )
@@ -789,6 +875,9 @@ app.post('/api/public/submit-final', (req: Request, res: Response) => {
   }
 
   const settings = getSettingsRow();
+  const enabledSteps = normalizeEnabledRegistrationSteps(settings.enabled_registration_steps);
+  const isStepEnabled = (stepNum: number) => enabledSteps.includes(stepNum);
+
   const ageCheck = evaluateAgeQualification(dossier.gender, dossier.calculated_age, settings);
   if (!ageCheck.qualified) {
     res.status(400).json({
@@ -797,13 +886,22 @@ app.post('/api/public/submit-final', (req: Request, res: Response) => {
     return;
   }
 
-  if (!settings.allow_submit_without_resume && (!dossier.resume_text || !dossier.resume_text.trim())) {
+  if (
+    isStepEnabled(8) &&
+    !settings.allow_submit_without_resume &&
+    (!dossier.resume_text || !dossier.resume_text.trim())
+  ) {
     res.status(400).json({ error: 'نوشتن رزومه برای ثبت نهایی درخواست الزامی است.' });
     return;
   }
 
-  if (!dossier.first_name || !dossier.last_name || !dossier.city || !dossier.full_address) {
-    res.status(400).json({ error: 'لطفاً تمامی فیلدهای هویتی و آدرس محل سکونت را تکمیل نمایید.' });
+  if (!dossier.first_name || !dossier.last_name) {
+    res.status(400).json({ error: 'لطفاً نام و نام خانوادگی خود را تکمیل نمایید.' });
+    return;
+  }
+
+  if (isStepEnabled(3) && (!dossier.city || !dossier.full_address)) {
+    res.status(400).json({ error: 'لطفاً شهرستان و آدرس کامل محل سکونت را تکمیل نمایید.' });
     return;
   }
 
@@ -812,22 +910,67 @@ app.post('/api/public/submit-final', (req: Request, res: Response) => {
     return;
   }
 
-  if (!dossier.education || dossier.education.length === 0) {
+  if (isStepEnabled(2) && (!dossier.education || dossier.education.length === 0)) {
     res.status(400).json({ error: 'حداقل یک سابقه تحصیلی باید ثبت شود.' });
     return;
   }
 
-  if (!dossier.contacts || dossier.contacts.length === 0) {
+  if (isStepEnabled(4) && (!dossier.contacts || dossier.contacts.length === 0)) {
     res.status(400).json({ error: 'ثبت اطلاعات حداقل یکی از بستگان الزامی است.' });
     return;
   }
 
-  if (!dossier.proposed_salary_toman || dossier.proposed_salary_toman < 1000000) {
+  if (isStepEnabled(7) && (!dossier.proposed_salary_toman || dossier.proposed_salary_toman < 1000000)) {
     res.status(400).json({ error: 'لطفاً مبلغ حقوق پیشنهادی ماهانه را به درستی وارد نمایید.' });
     return;
   }
 
+  const wasAlreadySubmitted = dossier.is_submitted === 1;
+  if (wasAlreadySubmitted && dossier.is_terminal === 1) {
+    res.status(403).json({
+      error: 'پرونده شما در وضعیت نهایی قرار دارد و امکان ذخیره تغییرات جدید وجود ندارد.',
+    });
+    return;
+  }
+
   const nowJalali = getCurrentJalaliDateTime();
+  if (wasAlreadySubmitted) {
+    db.prepare(
+      `UPDATE recruitment_applications SET
+        current_step = 9,
+        completion_percent = 100,
+        updated_at_jalali = ?,
+        updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(nowJalali, dossier.application_id)
+      .run();
+
+    db.prepare(
+      `INSERT INTO recruitment_events (
+        application_id, event_type, title, description, actor_name, previous_status, new_status, event_date_jalali
+      ) VALUES (?, 'APPLICANT_EDITED', 'ویرایش اطلاعات ثبت‌نامی توسط متقاضی', ?, ?, ?, ?, ?)`
+    )
+      .bind(
+        dossier.application_id,
+        'متقاضی اطلاعات ثبت‌نامی پرونده خود را بازبینی و به‌روزرسانی نمود.',
+        dossier.full_name,
+        dossier.status_title,
+        dossier.status_title,
+        nowJalali
+      )
+      .run();
+
+    const updated = buildFullDossier(dossier.application_id, false);
+    res.json({
+      success: true,
+      edited: true,
+      dossier: updated,
+      sms_dispatched: false,
+    });
+    return;
+  }
+
   db.prepare(
     `UPDATE recruitment_applications SET
       is_submitted = 1,
@@ -845,7 +988,7 @@ app.post('/api/public/submit-final', (req: Request, res: Response) => {
   db.prepare(
     `INSERT INTO recruitment_events (
       application_id, event_type, title, description, actor_name, previous_status, new_status, event_date_jalali
-    ) VALUES (?, 'FINAL_SUBMIT', 'ثبت نهایی درخواست استخدام', ?, ?, 'پیش‌نویس', 'ثبت درخواست جدید', ?)`
+    ) VALUES (?, 'FINAL_SUBMIT', 'ثبت نهایی درخواست استخدام', ?, ?, 'پیش‌نویس', 'در انتظار مصاحبه حضوری', ?)`
   )
     .bind(
       dossier.application_id,
@@ -881,6 +1024,7 @@ app.post('/api/public/submit-final', (req: Request, res: Response) => {
 
   res.json({
     success: true,
+    edited: false,
     dossier: updated,
     sms_dispatched: Boolean(smsSettings.sms_enabled && smsSettings.templates.REGISTRATION_SUCCESS.enabled),
   });
@@ -1348,6 +1492,136 @@ app.post('/api/admin/applicants/batch-dossiers', (req: Request, res: Response) =
   const ids: number[] = Array.isArray(req.body.application_ids) ? req.body.application_ids : [];
   const dossiers = ids.map((id) => buildFullDossier(Number(id), true)).filter(Boolean);
   res.json({ dossiers });
+});
+
+app.post('/api/admin/applicants/bulk-delete', (req: Request, res: Response) => {
+  const rawIds = Array.isArray(req.body?.application_ids) ? req.body.application_ids : [];
+  const ids: number[] = Array.from(
+    new Set(
+      rawIds
+        .map((id: unknown) => Number(id))
+        .filter((id: number) => Number.isInteger(id) && id > 0)
+    )
+  );
+
+  if (ids.length === 0) {
+    res.status(400).json({ error: 'هیچ پرونده‌ای برای حذف انتخاب نشده است.' });
+    return;
+  }
+
+  const raw = db.getRawSqlite();
+  const deletedTargets: Array<{ application_id: number; full_name: string; national_code: string }> = [];
+
+  const bulkDeleteTx = raw.transaction(() => {
+    for (const applicationId of ids) {
+      const target = db
+        .prepare(
+          `SELECT ra.id as application_id, a.id as applicant_id, a.first_name, a.last_name, a.national_code
+           FROM recruitment_applications ra
+           JOIN applicants a ON a.id = ra.applicant_id
+           WHERE ra.id = ?`
+        )
+        .bind(applicationId)
+        .first<{
+          application_id: number;
+          applicant_id: number;
+          first_name: string;
+          last_name: string;
+          national_code: string;
+        }>();
+
+      if (!target) continue;
+
+      db.prepare('DELETE FROM otp_verifications WHERE national_code = ?')
+        .bind(target.national_code)
+        .run();
+      db.prepare('DELETE FROM applicants WHERE id = ?').bind(target.applicant_id).run();
+
+      deletedTargets.push({
+        application_id: target.application_id,
+        full_name: `${target.first_name} ${target.last_name}`.trim(),
+        national_code: target.national_code,
+      });
+    }
+  });
+
+  bulkDeleteTx();
+
+  if (deletedTargets.length === 0) {
+    res.status(404).json({ error: 'هیچ‌یک از پرونده‌های انتخاب‌شده یافت نشد.' });
+    return;
+  }
+
+  const namesSummary = deletedTargets
+    .slice(0, 5)
+    .map((t) => `${t.full_name} (${t.national_code})`)
+    .join('، ');
+  const suffix = deletedTargets.length > 5 ? ` و ${toPersianDigits(deletedTargets.length - 5)} نفر دیگر` : '';
+
+  logAudit(
+    'BULK_DELETE_APPLICANTS',
+    'APPLICATION',
+    deletedTargets.map((t) => t.application_id).join(','),
+    `حذف گروهی ${toPersianDigits(deletedTargets.length)} متقاضی: ${namesSummary}${suffix}`
+  );
+
+  res.json({
+    success: true,
+    deleted_count: deletedTargets.length,
+    deleted_ids: deletedTargets.map((t) => t.application_id),
+  });
+});
+
+app.delete('/api/admin/applicants/:applicationId', (req: Request, res: Response) => {
+  const applicationId = Number(req.params.applicationId);
+  if (!Number.isInteger(applicationId) || applicationId <= 0) {
+    res.status(400).json({ error: 'شناسه پرونده نامعتبر است.' });
+    return;
+  }
+
+  const target = db
+    .prepare(
+      `SELECT ra.id as application_id, a.id as applicant_id, a.first_name, a.last_name, a.national_code
+       FROM recruitment_applications ra
+       JOIN applicants a ON a.id = ra.applicant_id
+       WHERE ra.id = ?`
+    )
+    .bind(applicationId)
+    .first<{
+      application_id: number;
+      applicant_id: number;
+      first_name: string;
+      last_name: string;
+      national_code: string;
+    }>();
+
+  if (!target) {
+    res.status(404).json({ error: 'پرونده متقاضی یافت نشد.' });
+    return;
+  }
+
+  const fullName = `${target.first_name} ${target.last_name}`.trim();
+  const raw = db.getRawSqlite();
+  const deleteTx = raw.transaction(() => {
+    db.prepare('DELETE FROM otp_verifications WHERE national_code = ?')
+      .bind(target.national_code)
+      .run();
+    db.prepare('DELETE FROM applicants WHERE id = ?').bind(target.applicant_id).run();
+  });
+  deleteTx();
+
+  logAudit(
+    'DELETE_APPLICANT',
+    'APPLICATION',
+    String(applicationId),
+    `حذف کامل پرونده متقاضی ${fullName} (کد ملی: ${target.national_code})`
+  );
+
+  res.json({
+    success: true,
+    deleted_application_id: applicationId,
+    deleted_full_name: fullName,
+  });
 });
 
 app.post('/api/admin/applicants/bulk-status', (req: Request, res: Response) => {
@@ -2093,10 +2367,41 @@ app.put('/api/admin/settings', (req: Request, res: Response) => {
     allow_submit_without_resume,
     default_job_title,
     company_districts,
+    org_logo_data_url,
+    enabled_registration_steps,
   } = req.body;
 
+  let nextOrgLogo = current.org_logo_data_url || '';
+  if (org_logo_data_url !== undefined) {
+    const rawLogo = String(org_logo_data_url || '').trim();
+    if (rawLogo === '') {
+      nextOrgLogo = '';
+    } else {
+      const validLogoPattern = /^data:image\/(png|jpeg|jpg|webp);base64,[A-Za-z0-9+/=]+$/;
+      if (!validLogoPattern.test(rawLogo) || rawLogo.length > 750000) {
+        res.status(400).json({
+          error:
+            'فرمت یا حجم لوگوی سازمانی نامعتبر است. فقط تصاویر PNG، JPG یا WebP با حداکثر حجم ۵۰۰ کیلوبایت مجاز هستند.',
+        });
+        return;
+      }
+      nextOrgLogo = rawLogo;
+    }
+  }
+
+  const nextEnabledSteps =
+    enabled_registration_steps !== undefined
+      ? normalizeEnabledRegistrationSteps(enabled_registration_steps)
+      : normalizeEnabledRegistrationSteps(current.enabled_registration_steps);
+
   const nowJalali = getCurrentJalaliDateTime();
-  const summary = `بازه سنی بانوان (${toPersianDigits(female_min_age)}-${toPersianDigits(female_max_age)})، آقایان (${toPersianDigits(male_min_age)}-${toPersianDigits(male_max_age)})، وضعیت محدودیت سنی: ${age_limit_enabled ? 'فعال' : 'غیرفعال'}`;
+  const logoChangedNote =
+    org_logo_data_url !== undefined && nextOrgLogo !== (current.org_logo_data_url || '')
+      ? nextOrgLogo
+        ? '، به‌روزرسانی لوگوی اختصاصی چاپ'
+        : '، بازگشت به لوگوی برداری پیش‌فرض'
+      : '';
+  const summary = `بازه سنی بانوان (${toPersianDigits(female_min_age)}-${toPersianDigits(female_max_age)})، آقایان (${toPersianDigits(male_min_age)}-${toPersianDigits(male_max_age)})، وضعیت محدودیت سنی: ${age_limit_enabled ? 'فعال' : 'غیرفعال'}${logoChangedNote}`;
 
   const updatedHistory = [
     {
@@ -2116,6 +2421,8 @@ app.put('/api/admin/settings', (req: Request, res: Response) => {
       male_max_age = ?,
       allow_submit_without_resume = ?,
       default_job_title = ?,
+      org_logo_data_url = ?,
+      enabled_registration_steps_json = ?,
       company_districts_json = ?,
       settings_history_json = ?,
       updated_by = ?,
@@ -2130,6 +2437,8 @@ app.put('/api/admin/settings', (req: Request, res: Response) => {
       Number(male_max_age),
       allow_submit_without_resume ? 1 : 0,
       String(default_job_title || current.default_job_title),
+      nextOrgLogo,
+      JSON.stringify(nextEnabledSteps),
       JSON.stringify(Array.isArray(company_districts) ? company_districts : current.company_districts),
       JSON.stringify(updatedHistory),
       ADMIN_ACTOR_NAME,
@@ -2138,6 +2447,48 @@ app.put('/api/admin/settings', (req: Request, res: Response) => {
     .run();
 
   logAudit('UPDATE_SETTINGS', 'SETTINGS', '1', summary);
+  res.json({ success: true, settings: getSettingsRow() });
+});
+
+app.patch('/api/admin/settings/registration-steps', (req: Request, res: Response) => {
+  const { enabled_registration_steps } = req.body || {};
+  if (!Array.isArray(enabled_registration_steps)) {
+    res.status(400).json({ error: 'فهرست مراحل فعال فرم ثبت‌نام معتبر نیست.' });
+    return;
+  }
+
+  const current = getSettingsRow();
+  const nextSteps = normalizeEnabledRegistrationSteps(enabled_registration_steps);
+  const nowJalali = getCurrentJalaliDateTime();
+  const disabledTitles = REGISTRATION_STEPS_META.filter((m) => !nextSteps.includes(m.step)).map(
+    (m) => m.title
+  );
+  const summary =
+    disabledTitles.length === 0
+      ? 'فعال‌سازی تمام ۹ مرحله فرم ثبت‌نام متقاضیان'
+      : `تنظیم مراحل فعال فرم ثبت‌نام (${toPersianDigits(nextSteps.length)} از ۹ مرحله فعال · غیرفعال: ${disabledTitles.join('، ')})`;
+
+  const updatedHistory = [
+    {
+      changed_at_jalali: nowJalali,
+      changed_by: ADMIN_ACTOR_NAME,
+      summary,
+    },
+    ...current.settings_history,
+  ].slice(0, 25);
+
+  db.prepare(
+    `UPDATE recruitment_settings SET
+      enabled_registration_steps_json = ?,
+      settings_history_json = ?,
+      updated_by = ?,
+      updated_at_jalali = ?
+     WHERE id = 1`
+  )
+    .bind(JSON.stringify(nextSteps), JSON.stringify(updatedHistory), ADMIN_ACTOR_NAME, nowJalali)
+    .run();
+
+  logAudit('UPDATE_REGISTRATION_STEPS', 'SETTINGS', '1', summary);
   res.json({ success: true, settings: getSettingsRow() });
 });
 

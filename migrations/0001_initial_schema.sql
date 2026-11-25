@@ -110,6 +110,8 @@ CREATE TABLE IF NOT EXISTS recruitment_settings (
   default_job_title TEXT NOT NULL DEFAULT 'کارمند اداری و دفتری (ساعت ۸ الی ۱۴)',
   default_theme TEXT NOT NULL DEFAULT 'azure-professional',
   custom_theme_json TEXT NOT NULL DEFAULT '{}',
+  org_logo_data_url TEXT NOT NULL DEFAULT '',
+  enabled_registration_steps_json TEXT NOT NULL DEFAULT '[1,2,3,4,5,6,7,8,9]',
   company_districts_json TEXT NOT NULL DEFAULT '["مرکز شهر", "فرهنگیان", "کوی نیرو", "دروازه", "دولت‌آباد", "کوی بوستان", "سایر مناطق"]',
   settings_history_json TEXT NOT NULL DEFAULT '[]',
   updated_by TEXT NOT NULL DEFAULT 'مدیر سامانه',

@@ -13,17 +13,25 @@ import {
   Clock,
   Palette,
   MessageSquare,
+  Upload,
+  Trash2,
+  Lock,
+  RotateCcw,
 } from 'lucide-react';
 import {
   ApplicantFullDossier,
   ApplicantSummaryRow,
+  DEFAULT_ENABLED_REGISTRATION_STEPS,
   EvaluationCriterion,
   InterviewRecord,
+  REGISTRATION_STEPS_META,
   RecruitmentSettings,
+  normalizeEnabledRegistrationSteps,
 } from '../types/recruitment.ts';
 import { ThemePresetId, ThemeTokens } from '../theme/presets.ts';
 import { ThemeGalleryView } from './ThemeGalleryView.tsx';
 import { SmsSettingsView } from './SmsSettingsView.tsx';
+import { DastevaLogoMark } from './DastevaLogoMark.tsx';
 import { formatToman, toPersianDigits } from '../utils/validation.ts';
 
 // ============================================================================
@@ -722,6 +730,10 @@ export const SettingsAndUsersView: React.FC<{
   const [settings, setSettings] = useState<RecruitmentSettings | null>(null);
   const [auditLogs, setAuditLogs] = useState<Array<Record<string, unknown>>>([]);
   const [toast, setToast] = useState('');
+  const [settingsError, setSettingsError] = useState('');
+  const [isSavingSteps, setIsSavingSteps] = useState(false);
+  const [stepsToast, setStepsToast] = useState('');
+  const [stepsError, setStepsError] = useState('');
 
   const headers = {
     'Content-Type': 'application/json',
@@ -742,9 +754,36 @@ export const SettingsAndUsersView: React.FC<{
     fetchAll();
   }, []);
 
+  const handleLogoFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file || !settings) return;
+    setSettingsError('');
+
+    const allowedTypes = ['image/png', 'image/jpeg', 'image/jpg', 'image/webp'];
+    if (!allowedTypes.includes(file.type)) {
+      setSettingsError('فرمت تصویر مجاز نیست. لطفاً فایل PNG، JPG یا WebP انتخاب کنید.');
+      return;
+    }
+    if (file.size > 500 * 1024) {
+      setSettingsError('حجم فایل لوگو نباید بیشتر از ۵۰۰ کیلوبایت باشد.');
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === 'string' ? reader.result : '';
+      if (result) {
+        setSettings((prev) => (prev ? { ...prev, org_logo_data_url: result } : prev));
+      }
+    };
+    reader.readAsDataURL(file);
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!settings) return;
+    setSettingsError('');
     const res = await fetch('/api/admin/settings', {
       method: 'PUT',
       headers,
@@ -753,11 +792,62 @@ export const SettingsAndUsersView: React.FC<{
     const data = await res.json();
     if (res.ok && data.settings) {
       setSettings(data.settings);
-      setToast('تنظیمات شرایط سنی و رزومه استخدام ذخیره شد و در تاریخچه ثبت گردید.');
-      setTimeout(() => setToast(''), 3000);
+      setToast('تنظیمات شرایط استخدام و سربرگ چاپی با موفقیت ذخیره شد.');
+      setTimeout(() => setToast(''), 3500);
       onSettingsUpdated();
       fetchAll();
+    } else {
+      setSettingsError(data.error || 'خطا در ذخیره‌سازی تنظیمات.');
     }
+  };
+
+  const persistRegistrationSteps = async (nextSteps: number[], feedbackText: string) => {
+    if (!settings || isSavingSteps) return;
+    const previousSteps = normalizeEnabledRegistrationSteps(settings.enabled_registration_steps);
+    const normalizedNext = normalizeEnabledRegistrationSteps(nextSteps);
+
+    setStepsError('');
+    setStepsToast('');
+    setIsSavingSteps(true);
+    setSettings((prev) => (prev ? { ...prev, enabled_registration_steps: normalizedNext } : prev));
+
+    try {
+      const res = await fetch('/api/admin/settings/registration-steps', {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({ enabled_registration_steps: normalizedNext }),
+      });
+      const data = await res.json();
+      if (res.ok && data.settings) {
+        setSettings(data.settings);
+        setStepsToast(feedbackText);
+        setTimeout(() => setStepsToast(''), 3200);
+        onSettingsUpdated();
+        fetchAll();
+      } else {
+        setSettings((prev) => (prev ? { ...prev, enabled_registration_steps: previousSteps } : prev));
+        setStepsError(data.error || 'خطا در ذخیره خودکار مراحل ثبت‌نام.');
+      }
+    } catch {
+      setSettings((prev) => (prev ? { ...prev, enabled_registration_steps: previousSteps } : prev));
+      setStepsError('خطا در برقراری ارتباط با سرور برای ذخیره مراحل ثبت‌نام.');
+    } finally {
+      setIsSavingSteps(false);
+    }
+  };
+
+  const handleToggleRegistrationStep = (stepNum: number) => {
+    if (!settings || stepNum === 1 || stepNum === 9) return;
+    const currentSteps = normalizeEnabledRegistrationSteps(settings.enabled_registration_steps);
+    const exists = currentSteps.includes(stepNum);
+    const nextSteps = exists
+      ? currentSteps.filter((s) => s !== stepNum)
+      : [...currentSteps, stepNum];
+    const stepTitle = REGISTRATION_STEPS_META.find((m) => m.step === stepNum)?.title || `مرحله ${stepNum}`;
+    const msg = exists
+      ? `مرحله «${stepTitle}» غیرفعال و بلافاصله ذخیره شد.`
+      : `مرحله «${stepTitle}» فعال و بلافاصله ذخیره شد.`;
+    void persistRegistrationSteps(nextSteps, msg);
   };
 
   const handleExportBackup = async () => {
@@ -848,6 +938,114 @@ export const SettingsAndUsersView: React.FC<{
         />
       ) : (
         <>
+          {/* Dynamic Registration Steps Manager (Instant Auto-Save) */}
+          {(() => {
+            const enabledSteps = normalizeEnabledRegistrationSteps(settings.enabled_registration_steps);
+            const allEnabled = enabledSteps.length === DEFAULT_ENABLED_REGISTRATION_STEPS.length;
+            return (
+              <section className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-4">
+                  <div>
+                    <h2 className="text-base font-extrabold text-slate-900 dark:text-white">
+                      مدیریت مراحل فعال فرم ثبت‌نام متقاضیان
+                    </h2>
+                    <p className="text-xs text-slate-500 mt-1">
+                      با تیک زدن یا برداشتن تیک مراحل ۲ تا ۸، همان لحظه مراحل فرم ثبت‌نام تغییر کرده و ذخیره می‌شوند. اطلاعات قبلی متقاضیان در پرونده مدیریت محفوظ می‌ماند.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3 text-xs">
+                    <span className="font-bold text-slate-700 dark:text-slate-300 tabular-nums">
+                      {toPersianDigits(enabledSteps.length)} از ۹ مرحله فعال
+                    </span>
+                    {!allEnabled && (
+                      <button
+                        type="button"
+                        disabled={isSavingSteps}
+                        onClick={() =>
+                          persistRegistrationSteps(
+                            [...DEFAULT_ENABLED_REGISTRATION_STEPS],
+                            'تمام ۹ مرحله فرم ثبت‌نام فعال و ذخیره شد.'
+                          )
+                        }
+                        className="inline-flex items-center gap-1.5 rounded-lg border border-blue-600 px-3 py-1.5 font-bold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 cursor-pointer disabled:opacity-50"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" />
+                        <span>فعال‌سازی همه ۹ مرحله</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {stepsToast && (
+                  <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 shrink-0" />
+                    <span>{stepsToast}</span>
+                  </div>
+                )}
+
+                {stepsError && (
+                  <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold flex items-center gap-2">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>{stepsError}</span>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {REGISTRATION_STEPS_META.map((stepMeta) => {
+                    const isChecked = enabledSteps.includes(stepMeta.step);
+                    return (
+                      <label
+                        key={stepMeta.step}
+                        className={`flex items-start gap-3 p-3.5 rounded-lg border transition-colors ${
+                          stepMeta.required
+                            ? 'border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40 cursor-not-allowed'
+                            : isChecked
+                            ? 'border-blue-200 dark:border-blue-900 bg-blue-50/30 dark:bg-blue-950/20 hover:border-blue-400 cursor-pointer'
+                            : 'border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 opacity-75 hover:opacity-100 hover:border-slate-300 dark:hover:border-slate-700 cursor-pointer'
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={isChecked}
+                          disabled={stepMeta.required || isSavingSteps}
+                          onChange={() => handleToggleRegistrationStep(stepMeta.step)}
+                          className="mt-0.5 w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 disabled:opacity-60"
+                        />
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center justify-between gap-2 text-xs">
+                            <span className="font-extrabold text-slate-900 dark:text-white tabular-nums truncate">
+                              {toPersianDigits(stepMeta.step)}. {stepMeta.title}
+                            </span>
+                            {stepMeta.required ? (
+                              <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-slate-500 dark:text-slate-400 shrink-0">
+                                <Lock className="w-3 h-3" />
+                                <span>الزامی · ثابت</span>
+                              </span>
+                            ) : (
+                              <span
+                                className={`text-[11px] font-bold shrink-0 ${
+                                  isChecked
+                                    ? 'text-emerald-700 dark:text-emerald-400'
+                                    : 'text-slate-400 dark:text-slate-500'
+                                }`}
+                              >
+                                {isChecked ? 'فعال' : 'غیرفعال'}
+                              </span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-relaxed">
+                            {stepMeta.description}
+                          </p>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+              </section>
+            );
+          })()}
+
           <form
             onSubmit={handleSaveSettings}
             className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 space-y-6"
@@ -883,6 +1081,13 @@ export const SettingsAndUsersView: React.FC<{
               <div className="p-3 rounded-lg bg-emerald-50 dark:bg-emerald-950/50 text-emerald-700 dark:text-emerald-300 text-xs font-bold flex items-center gap-2">
                 <CheckCircle2 className="w-4 h-4" />
                 <span>{toast}</span>
+              </div>
+            )}
+
+            {settingsError && (
+              <div className="p-3 rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 text-rose-700 dark:text-rose-300 text-xs font-bold flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 shrink-0" />
+                <span>{settingsError}</span>
               </div>
             )}
 
@@ -958,11 +1163,52 @@ export const SettingsAndUsersView: React.FC<{
               </label>
             </div>
 
+            {/* Print Header Organization Logo Settings */}
+            <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div className="flex items-center gap-3.5">
+                  <DastevaLogoMark orgLogoDataUrl={settings.org_logo_data_url} size={56} />
+                  <div>
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      لوگوی سربرگ تمام گزارش‌ها و چاپ‌های سامانه
+                    </h3>
+                    <p className="text-xs text-slate-500 mt-0.5">
+                      به صورت پیش‌فرض لوگوی برداری رسمی شرکت دستوا در سربرگ چاپ‌ها درج می‌شود. در صورت تمایل می‌توانید لوگوی اختصاصی سازمان را (PNG، JPG یا WebP تا ۵۰۰ کیلوبایت) بارگذاری کنید.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <label className="inline-flex items-center gap-1.5 rounded-lg border border-blue-600 px-3.5 py-2 font-bold text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 cursor-pointer">
+                    <Upload className="w-4 h-4" />
+                    <span>آپلود لوگوی اختصاصی</span>
+                    <input
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={handleLogoFileChange}
+                      className="hidden"
+                    />
+                  </label>
+
+                  {settings.org_logo_data_url && (
+                    <button
+                      type="button"
+                      onClick={() => setSettings({ ...settings, org_logo_data_url: '' })}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-rose-300 dark:border-rose-800 px-3 py-2 font-semibold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/30 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>بازگشت به لوگوی پیش‌فرض</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+
             <button
               type="submit"
               className="rounded-lg bg-blue-600 px-6 py-2.5 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
             >
-              ذخیره تنظیمات شرایط استخدام
+              ذخیره تنظیمات شرایط استخدام و سربرگ چاپی
             </button>
           </form>
 

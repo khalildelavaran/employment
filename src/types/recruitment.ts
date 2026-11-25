@@ -87,6 +87,39 @@ export const RELATIVE_RELATIONSHIPS = [
   'سایر',
 ] as const;
 
+export interface RegistrationStepMeta {
+  step: number;
+  title: string;
+  description: string;
+  required: boolean;
+}
+
+export const REGISTRATION_STEPS_META: RegistrationStepMeta[] = [
+  { step: 1, title: 'اطلاعات هویتی', description: 'نام، کد ملی، تاریخ تولد، جنسیت و موبایل', required: true },
+  { step: 2, title: 'اطلاعات تحصیلی', description: 'مقطع، رشته تحصیلی، دانشگاه و شهر محل تحصیل', required: false },
+  { step: 3, title: 'محل سکونت', description: 'شهرستان، منطقه و نشانی کامل محل سکونت', required: false },
+  { step: 4, title: 'بستگان و معرف', description: 'مشخصات و شماره تماس بستگان یا معرف', required: false },
+  { step: 5, title: 'سوابق شغلی', description: 'تجربیات کاری قبلی، عنوان شغلی و مدت اشتغال', required: false },
+  { step: 6, title: 'نحوه آشنایی', description: 'طریقه آشنایی متقاضی با فرصت شغلی', required: false },
+  { step: 7, title: 'انتظارات مالی', description: 'مبلغ حقوق توافقی پیشنهادی ماهانه', required: false },
+  { step: 8, title: 'رزومه', description: 'متن رزومه، مهارت‌ها و دوره‌های آموزشی', required: false },
+  { step: 9, title: 'بازبینی و ثبت نهایی', description: 'مرور اطلاعات واردشده و تایید ثبت درخواست', required: true },
+];
+
+export const DEFAULT_ENABLED_REGISTRATION_STEPS: number[] = [1, 2, 3, 4, 5, 6, 7, 8, 9];
+
+export function normalizeEnabledRegistrationSteps(input: unknown): number[] {
+  const source = Array.isArray(input) ? input : DEFAULT_ENABLED_REGISTRATION_STEPS;
+  const set = new Set<number>([1, 9]);
+  for (const item of source) {
+    const n = Number(item);
+    if (Number.isInteger(n) && n >= 1 && n <= 9) {
+      set.add(n);
+    }
+  }
+  return Array.from(set).sort((a, b) => a - b);
+}
+
 export interface EducationRecord {
   id?: number;
   major: string;
@@ -213,6 +246,8 @@ export interface RecruitmentSettings {
   default_job_title: string;
   default_theme?: string;
   custom_theme?: Record<string, unknown>;
+  org_logo_data_url?: string;
+  enabled_registration_steps?: number[];
   company_districts: string[];
   settings_history: Array<{
     changed_at_jalali: string;
@@ -252,6 +287,7 @@ export interface ApplicantSummaryRow {
   proposed_salary_toman: number;
   status_code: ApplicationStatusCode;
   status_title: string;
+  is_terminal?: number;
   in_person_docs_status: InPersonDocsStatus;
   has_resume: boolean;
   avg_evaluation_score: number;

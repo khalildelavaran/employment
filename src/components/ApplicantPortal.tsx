@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CheckCircle2,
   ChevronLeft,
@@ -15,16 +15,25 @@ import {
   Save,
   ShieldCheck,
   MessageSquare,
+  User,
+  LogOut,
+  X,
+  WifiOff,
+  RefreshCw,
+  RotateCcw,
 } from 'lucide-react';
 import {
   ACQUAINTANCE_SOURCES,
   ApplicantFullDossier,
   ContactRecord,
+  DEFAULT_ENABLED_REGISTRATION_STEPS,
   DEGREE_LEVELS,
   EducationRecord,
   MILITARY_STATUS_OPTIONS,
+  REGISTRATION_STEPS_META,
   RELATIVE_RELATIONSHIPS,
   WorkExperienceRecord,
+  normalizeEnabledRegistrationSteps,
 } from '../types/recruitment.ts';
 import {
   calculateAgeFromJalali,
@@ -35,7 +44,18 @@ import {
   validateIranianMobile,
   validateIranianNationalCode,
 } from '../utils/validation.ts';
+import {
+  ApplicantLocalDraft,
+  clearApplicantDraft,
+  formatDraftClockPersian,
+  loadApplicantDraftByNationalCode,
+  loadLastActiveApplicantDraft,
+  markApplicantDraftSynced,
+  purgeExpiredApplicantDrafts,
+  saveApplicantDraft,
+} from '../utils/applicantDraftStorage.ts';
 import { PrintReportModal } from './PrintReportModal.tsx';
+import { JalaliDatePicker } from './JalaliDatePicker.tsx';
 
 interface PublicConfig {
   default_job_title: string;
@@ -51,19 +71,20 @@ interface PublicConfig {
   applicant_2fa_enabled?: boolean;
   otp_expiry_seconds?: number;
   otp_resend_seconds?: number;
+  org_logo_data_url?: string;
+  enabled_registration_steps?: number[];
 }
 
-const STEP_TITLES = [
-  { step: 1, title: 'اطلاعات هویتی' },
-  { step: 2, title: 'اطلاعات تحصیلی' },
-  { step: 3, title: 'محل سکونت' },
-  { step: 4, title: 'بستگان و معرف' },
-  { step: 5, title: 'سوابق شغلی' },
-  { step: 6, title: 'نحوه آشنایی' },
-  { step: 7, title: 'انتظارات مالی' },
-  { step: 8, title: 'رزومه' },
-  { step: 9, title: 'بازبینی و ثبت نهایی' },
-];
+const STEPPER_GRID_COLS: Record<number, string> = {
+  2: 'grid-cols-2',
+  3: 'grid-cols-3',
+  4: 'grid-cols-2 sm:grid-cols-4',
+  5: 'grid-cols-2 sm:grid-cols-5',
+  6: 'grid-cols-2 sm:grid-cols-6',
+  7: 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-7',
+  8: 'grid-cols-2 sm:grid-cols-4 lg:grid-cols-8',
+  9: 'grid-cols-3 sm:grid-cols-9',
+};
 
 export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () => {
   const [config, setConfig] = useState<PublicConfig>({
@@ -77,6 +98,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
     female_max_age: 34,
     male_min_age: 22,
     male_max_age: 36,
+    enabled_registration_steps: [...DEFAULT_ENABLED_REGISTRATION_STEPS],
   });
 
   // Portal View Mode: 'ENTRY' | 'FORM' | 'TRACKING'
@@ -93,14 +115,52 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
   const [otpExpirySeconds, setOtpExpirySeconds] = useState(0);
   const [otpResendSeconds, setOtpResendSeconds] = useState(0);
   const [registrationSmsNotice, setRegistrationSmsNotice] = useState(false);
+  const [editSavedNotice, setEditSavedNotice] = useState(false);
+  const lastAutoSubmittedOtpRef = useRef('');
 
   // Multi-Step Form State
   const [currentStep, setCurrentStep] = useState(1);
+  const [highestReachedStep, setHighestReachedStep] = useState(1);
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
-  const [autoSaveToast, setAutoSaveToast] = useState('');
   const [activeDossier, setActiveDossier] = useState<ApplicantFullDossier | null>(null);
   const [isEditingSubmitted, setIsEditingSubmitted] = useState(false);
   const [showReceiptModal, setShowReceiptModal] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+
+  // Offline-Resilient Auto-Save & Sync State
+  type DraftSyncStatus =
+    | 'idle'
+    | 'local_saved'
+    | 'syncing'
+    | 'synced'
+    | 'offline_saved'
+    | 'sync_error';
+
+  type SyncDraftResult =
+    | { status: 'synced'; dossier: ApplicantFullDossier }
+    | { status: 'validation_error'; message: string }
+    | { status: 'network_error' };
+
+  const [isOnline, setIsOnline] = useState<boolean>(() =>
+    typeof navigator !== 'undefined' ? navigator.onLine : true
+  );
+  const [syncStatus, setSyncStatus] = useState<DraftSyncStatus>('idle');
+  const [lastLocalSavedAt, setLastLocalSavedAt] = useState<number | null>(null);
+  const [lastServerSyncedAt, setLastServerSyncedAt] = useState<number | null>(null);
+  const [restoredDraftInfo, setRestoredDraftInfo] = useState<{
+    savedAt: number;
+    wasPendingSync: boolean;
+  } | null>(null);
+
+  const inFlightSyncRef = useRef(false);
+  const suppressAutoSaveRef = useRef(false);
+  const pendingSyncRef = useRef(false);
+  const viewModeRef = useRef<'ENTRY' | 'FORM' | 'TRACKING'>('ENTRY');
+  const currentStepRef = useRef(1);
+  const persistLocalRef = useRef<(stepOverride?: number, markPending?: boolean) => void>(() => {});
+  const syncFnRef = useRef<
+    (targetStep: number, opts?: { silent?: boolean }) => Promise<SyncDraftResult>
+  >(async () => ({ status: 'network_error' }));
 
   // Step 1: Identity
   const [firstName, setFirstName] = useState('');
@@ -166,6 +226,15 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
       .catch(() => {});
   }, []);
 
+  const enabledSteps = normalizeEnabledRegistrationSteps(config.enabled_registration_steps);
+  const activeSteps = REGISTRATION_STEPS_META.filter((s) => enabledSteps.includes(s.step));
+  const isStepEnabled = (stepNum: number) => enabledSteps.includes(stepNum);
+  const snapToActiveStep = (rawStep: number, stepsList: number[] = enabledSteps): number => {
+    if (stepsList.includes(rawStep)) return rawStep;
+    const nextEnabled = stepsList.find((n) => n >= rawStep);
+    return nextEnabled ?? stepsList[stepsList.length - 1] ?? 1;
+  };
+
   // Automatically recalculate age whenever birthDateJalali changes
   useEffect(() => {
     const res = calculateAgeFromJalali(birthDateJalali);
@@ -174,7 +243,23 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
     }
   }, [birthDateJalali]);
 
+  // If admin disables the currently viewed step, snap smoothly to the nearest active step
+  useEffect(() => {
+    if (viewMode === 'FORM' && !enabledSteps.includes(currentStep)) {
+      const snapped = snapToActiveStep(currentStep, enabledSteps);
+      setCurrentStep(snapped);
+      setHighestReachedStep((prev) => Math.max(prev, snapped));
+    }
+  }, [viewMode, currentStep, config.enabled_registration_steps]);
+
+  const releaseAutoSaveSuppressionSoon = () => {
+    window.setTimeout(() => {
+      suppressAutoSaveRef.current = false;
+    }, 150);
+  };
+
   const populateFormFromDossier = (d: ApplicantFullDossier) => {
+    suppressAutoSaveRef.current = true;
     setActiveDossier(d);
     setFirstName(d.first_name || '');
     setLastName(d.last_name || '');
@@ -200,14 +285,261 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
 
     if (d.education && d.education.length > 0) {
       setEducationList(d.education);
+    } else {
+      setEducationList([{ major: '', degree_level: 'کارشناسی', university_name: '', study_city: 'شوشتر' }]);
     }
     if (d.work_experiences && d.work_experiences.length > 0) {
       setWorkList(d.work_experiences);
+    } else {
+      setWorkList([
+        {
+          company_name: '',
+          job_title: '',
+          duration_text: '',
+          duration_months: 12,
+          responsibilities: '',
+          leaving_reason: '',
+        },
+      ]);
     }
     if (d.contacts && d.contacts.length > 0) {
       setContactsList(d.contacts);
+    } else {
+      setContactsList([{ full_name: '', relationship: 'پدر', mobile: '' }]);
+    }
+    releaseAutoSaveSuppressionSoon();
+  };
+
+  const applyLocalDraftToForm = (draft: ApplicantLocalDraft, stepsList: number[] = enabledSteps) => {
+    suppressAutoSaveRef.current = true;
+    const snappedStep = snapToActiveStep(Math.min(9, Math.max(1, draft.currentStep || 1)), stepsList);
+    const snappedHighest = snapToActiveStep(
+      Math.min(9, Math.max(snappedStep, draft.highestReachedStep || snappedStep)),
+      stepsList
+    );
+
+    setFirstName(draft.firstName || '');
+    setLastName(draft.lastName || '');
+    setNationalCode(draft.nationalCode || '');
+    setGender(draft.gender === 'مرد' ? 'مرد' : 'زن');
+    setBirthDateJalali(draft.birthDateJalali || '1379/04/15');
+    setCalculatedAge(draft.calculatedAge || 26);
+    setMaritalStatus(draft.maritalStatus || 'مجرد');
+    setMilitaryStatus(draft.militaryStatus || '');
+    setFatherName(draft.fatherName || '');
+    setFatherAliveStatus(draft.fatherAliveStatus || 'در قید حیات');
+    setFatherJob(draft.fatherJob || '');
+    setMobile(draft.mobile || '');
+    setEducationList(
+      draft.educationList && draft.educationList.length > 0
+        ? draft.educationList
+        : [{ major: '', degree_level: 'کارشناسی', university_name: '', study_city: 'شوشتر' }]
+    );
+    setCity(draft.city || 'شوشتر');
+    setDistrictInputMode(draft.districtInputMode === 'manual' ? 'manual' : 'list');
+    setDistrict(draft.district || config.company_districts[0] || 'مرکز شهر شوشتر');
+    setFullAddress(draft.fullAddress || '');
+    setContactsList(
+      draft.contactsList && draft.contactsList.length > 0
+        ? draft.contactsList
+        : [{ full_name: '', relationship: 'پدر', mobile: '' }]
+    );
+    setHasWorkExperience(Boolean(draft.hasWorkExperience));
+    setWorkList(
+      draft.workList && draft.workList.length > 0
+        ? draft.workList
+        : [
+            {
+              company_name: '',
+              job_title: '',
+              duration_text: '',
+              duration_months: 12,
+              responsibilities: '',
+              leaving_reason: '',
+            },
+          ]
+    );
+    setAcquaintanceSource(draft.acquaintanceSource || ACQUAINTANCE_SOURCES[0]);
+    setAcquaintanceNote(draft.acquaintanceNote || '');
+    setProposedSalaryToman(draft.proposedSalaryToman || 12000000);
+    setResumeText(draft.resumeText || '');
+    setIsEditingSubmitted(Boolean(draft.isEditingSubmitted));
+    setCurrentStep(snappedStep);
+    setHighestReachedStep(snappedHighest);
+    setLastLocalSavedAt(draft.savedAt);
+    setLastServerSyncedAt(draft.lastSyncedAt ?? null);
+    pendingSyncRef.current = Boolean(draft.pendingServerSync);
+    releaseAutoSaveSuppressionSoon();
+  };
+
+  const persistCurrentFormLocally = (stepOverride?: number, markPending = true) => {
+    const cleanNat = toEnglishDigits(nationalCode).trim();
+    if (!cleanNat) return;
+    const stepToSave = stepOverride ?? currentStep;
+    const highestToSave = Math.max(highestReachedStep, stepToSave);
+    const res = saveApplicantDraft({
+      nationalCode: cleanNat,
+      mobile: toEnglishDigits(mobile).trim(),
+      currentStep: stepToSave,
+      highestReachedStep: highestToSave,
+      isEditingSubmitted,
+      firstName,
+      lastName,
+      gender,
+      birthDateJalali,
+      calculatedAge,
+      maritalStatus,
+      militaryStatus: gender === 'مرد' ? militaryStatus : '',
+      fatherName,
+      fatherAliveStatus,
+      fatherJob,
+      educationList,
+      city,
+      districtInputMode,
+      district,
+      fullAddress,
+      contactsList,
+      hasWorkExperience,
+      workList,
+      acquaintanceSource,
+      acquaintanceNote,
+      proposedSalaryToman,
+      resumeText,
+      lastSyncedAt: lastServerSyncedAt,
+      pendingServerSync: markPending,
+    });
+    if (res.ok) {
+      setLastLocalSavedAt(res.savedAt);
+      pendingSyncRef.current = markPending;
+      if (markPending) {
+        const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : isOnline;
+        setSyncStatus(onlineNow ? 'local_saved' : 'offline_saved');
+      }
     }
   };
+
+  viewModeRef.current = viewMode;
+  currentStepRef.current = currentStep;
+  persistLocalRef.current = persistCurrentFormLocally;
+
+  // On mount: purge expired (>7 days) drafts and auto-restore last active draft if present
+  useEffect(() => {
+    purgeExpiredApplicantDrafts();
+    const savedDraft = loadLastActiveApplicantDraft();
+    if (savedDraft && savedDraft.nationalCode) {
+      applyLocalDraftToForm(savedDraft, DEFAULT_ENABLED_REGISTRATION_STEPS);
+      setViewMode('FORM');
+      setRestoredDraftInfo({
+        savedAt: savedDraft.savedAt,
+        wasPendingSync: Boolean(savedDraft.pendingServerSync),
+      });
+      const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : true;
+      setIsOnline(onlineNow);
+      setSyncStatus(
+        onlineNow
+          ? savedDraft.pendingServerSync
+            ? 'local_saved'
+            : 'synced'
+          : 'offline_saved'
+      );
+    }
+  }, []);
+
+  // Online / Offline listeners + instant flush on page hide / tab close
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsOnline(true);
+      if (viewModeRef.current === 'FORM' && pendingSyncRef.current) {
+        void syncFnRef.current(currentStepRef.current, { silent: true });
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      if (viewModeRef.current === 'FORM') {
+        persistLocalRef.current(currentStepRef.current, true);
+        setSyncStatus('offline_saved');
+      }
+    };
+    const handleFlushOnExit = () => {
+      if (viewModeRef.current === 'FORM' && !suppressAutoSaveRef.current) {
+        persistLocalRef.current(currentStepRef.current, pendingSyncRef.current || true);
+      }
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') {
+        handleFlushOnExit();
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    window.addEventListener('pagehide', handleFlushOnExit);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('pagehide', handleFlushOnExit);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
+  // Debounced instant local auto-save (600ms) while editing the form
+  useEffect(() => {
+    if (viewMode !== 'FORM' || suppressAutoSaveRef.current) return;
+    if (!toEnglishDigits(nationalCode).trim()) return;
+    const timer = window.setTimeout(() => {
+      if (!suppressAutoSaveRef.current && viewModeRef.current === 'FORM') {
+        persistLocalRef.current(currentStep, true);
+      }
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [
+    viewMode,
+    currentStep,
+    highestReachedStep,
+    isEditingSubmitted,
+    firstName,
+    lastName,
+    nationalCode,
+    gender,
+    birthDateJalali,
+    calculatedAge,
+    maritalStatus,
+    militaryStatus,
+    fatherName,
+    fatherAliveStatus,
+    fatherJob,
+    mobile,
+    educationList,
+    city,
+    districtInputMode,
+    district,
+    fullAddress,
+    contactsList,
+    hasWorkExperience,
+    workList,
+    acquaintanceSource,
+    acquaintanceNote,
+    proposedSalaryToman,
+    resumeText,
+  ]);
+
+  // Debounced background server sync (3s) whenever online with unsynced local changes
+  useEffect(() => {
+    if (viewMode !== 'FORM' || !isOnline || !pendingSyncRef.current) return;
+    if (!lastLocalSavedAt) return;
+    const natOk = validateIranianNationalCode(nationalCode).valid;
+    const mobOk = validateIranianMobile(mobile).valid;
+    const ageOk = calculateAgeFromJalali(birthDateJalali).valid;
+    if (!natOk || !mobOk || !ageOk) return;
+
+    const timer = window.setTimeout(() => {
+      if (viewModeRef.current === 'FORM' && pendingSyncRef.current && navigator.onLine) {
+        void syncFnRef.current(currentStepRef.current, { silent: true });
+      }
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [viewMode, isOnline, lastLocalSavedAt, nationalCode, mobile, birthDateJalali]);
 
   useEffect(() => {
     if (!otpChallengeId) return;
@@ -226,19 +558,79 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
   }) => {
     setOtpChallengeId('');
     setOtpCode('');
+    lastAutoSubmittedOtpRef.current = '';
+    setEditSavedNotice(false);
+    setRegistrationSmsNotice(false);
+    setRestoredDraftInfo(null);
+
+    const cleanNat = toEnglishDigits(
+      data.dossier?.national_code || data.national_code || entryNationalCode
+    ).trim();
+    const localDraft = cleanNat ? loadApplicantDraftByNationalCode(cleanNat) : null;
+
     if (data.found && data.dossier) {
       populateFormFromDossier(data.dossier);
       if (data.dossier.is_submitted === 1) {
-        setViewMode('TRACKING');
+        // If user had an unsynced local edit draft for this submitted dossier, restore it; otherwise clear stale drafts
+        if (localDraft && localDraft.isEditingSubmitted && localDraft.pendingServerSync) {
+          applyLocalDraftToForm(localDraft, enabledSteps);
+          setRestoredDraftInfo({
+            savedAt: localDraft.savedAt,
+            wasPendingSync: true,
+          });
+          setSyncStatus(navigator.onLine ? 'local_saved' : 'offline_saved');
+          setViewMode('FORM');
+        } else {
+          clearApplicantDraft(cleanNat);
+          pendingSyncRef.current = false;
+          setIsEditingSubmitted(false);
+          setHighestReachedStep(9);
+          setViewMode('TRACKING');
+        }
       } else {
-        setCurrentStep(data.dossier.current_step || 1);
-        setViewMode('FORM');
+        if (localDraft && localDraft.pendingServerSync) {
+          applyLocalDraftToForm(localDraft, enabledSteps);
+          setRestoredDraftInfo({
+            savedAt: localDraft.savedAt,
+            wasPendingSync: true,
+          });
+          setSyncStatus(navigator.onLine ? 'local_saved' : 'offline_saved');
+          setViewMode('FORM');
+        } else {
+          const rawResumeStep = Math.min(9, Math.max(1, data.dossier.current_step || 1));
+          const resumeStep = snapToActiveStep(rawResumeStep);
+          setIsEditingSubmitted(false);
+          setCurrentStep(resumeStep);
+          setHighestReachedStep(resumeStep);
+          setSyncStatus('synced');
+          pendingSyncRef.current = false;
+          setViewMode('FORM');
+        }
       }
     } else {
-      setNationalCode(toEnglishDigits(data.national_code || entryNationalCode));
-      setMobile(toEnglishDigits(data.mobile || entryMobile));
-      setCurrentStep(1);
-      setViewMode('FORM');
+      setActiveDossier(null);
+      if (localDraft) {
+        applyLocalDraftToForm(localDraft, enabledSteps);
+        setRestoredDraftInfo({
+          savedAt: localDraft.savedAt,
+          wasPendingSync: Boolean(localDraft.pendingServerSync),
+        });
+        setSyncStatus(navigator.onLine ? 'local_saved' : 'offline_saved');
+        setViewMode('FORM');
+      } else {
+        suppressAutoSaveRef.current = true;
+        setIsEditingSubmitted(false);
+        setNationalCode(cleanNat);
+        setMobile(toEnglishDigits(data.mobile || entryMobile));
+        setCurrentStep(1);
+        setHighestReachedStep(1);
+        setSyncStatus('idle');
+        setLastLocalSavedAt(null);
+        setLastServerSyncedAt(null);
+        pendingSyncRef.current = false;
+        setViewMode('FORM');
+        releaseAutoSaveSuppressionSoon();
+      }
     }
   };
 
@@ -310,8 +702,9 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
     }
   };
 
-  const handleVerifyApplicantOtp = async (e: React.FormEvent) => {
-    e.preventDefault();
+  const verifyApplicantOtpCode = async (rawCode: string) => {
+    const cleanCode = toEnglishDigits(rawCode).replace(/\D/g, '').slice(0, 6);
+    if (!otpChallengeId || cleanCode.length !== 6) return;
     setEntryError('');
     setIsLoading(true);
     try {
@@ -320,7 +713,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           challenge_id: otpChallengeId,
-          code: toEnglishDigits(otpCode),
+          code: cleanCode,
         }),
       });
       const data = await res.json();
@@ -329,8 +722,29 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         return;
       }
       enterPortalWithLookupData(data);
+    } catch {
+      setEntryError('خطا در برقراری ارتباط با سرور برای بررسی کد تایید.');
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleVerifyApplicantOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await verifyApplicantOtpCode(otpCode);
+  };
+
+  const handleApplicantOtpInputChange = (rawVal: string) => {
+    const clean = toEnglishDigits(rawVal).replace(/\D/g, '').slice(0, 6);
+    setOtpCode(clean);
+    if (entryError) setEntryError('');
+    if (clean.length < 6) {
+      lastAutoSubmittedOtpRef.current = '';
+      return;
+    }
+    if (clean.length === 6 && !isLoading && otpChallengeId && lastAutoSubmittedOtpRef.current !== clean) {
+      lastAutoSubmittedOtpRef.current = clean;
+      void verifyApplicantOtpCode(clean);
     }
   };
 
@@ -354,6 +768,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         setOtpExpirySeconds(Number(data.expires_in || 120));
         setOtpResendSeconds(Number(data.resend_after || 60));
         setOtpCode('');
+        lastAutoSubmittedOtpRef.current = '';
       } else {
         setEntryError(data.error || 'ارسال مجدد کد تایید ناموفق بود.');
       }
@@ -434,7 +849,23 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
     return Object.keys(errs).length === 0;
   };
 
-  const triggerAutoSave = async (targetStep: number): Promise<ApplicantFullDossier | null> => {
+  const syncDraftToServer = async (
+    targetStep: number,
+    opts?: { silent?: boolean }
+  ): Promise<SyncDraftResult> => {
+    const silent = Boolean(opts?.silent);
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setIsOnline(false);
+      persistCurrentFormLocally(targetStep, true);
+      setSyncStatus('offline_saved');
+      return { status: 'network_error' };
+    }
+    if (inFlightSyncRef.current) {
+      return { status: 'network_error' };
+    }
+
+    inFlightSyncRef.current = true;
+    setSyncStatus('syncing');
     try {
       const res = await fetch('/api/public/save-draft', {
         method: 'POST',
@@ -467,44 +898,262 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
           allow_edit_before_submit: isEditingSubmitted,
         }),
       });
-      const data = await res.json();
+      const data = await res.json().catch(() => ({}));
       if (res.ok && data.dossier) {
+        const now = Date.now();
         setActiveDossier(data.dossier);
-        setAutoSaveToast('اطلاعات این مرحله به صورت خودکار ذخیره شد.');
-        setTimeout(() => setAutoSaveToast(''), 2800);
-        return data.dossier;
-      } else if (data.error) {
-        setFieldErrors({ global: data.error });
-        return null;
+        setIsOnline(true);
+        setLastServerSyncedAt(now);
+        pendingSyncRef.current = false;
+        markApplicantDraftSynced(nationalCode, now);
+        setSyncStatus('synced');
+        return { status: 'synced', dossier: data.dossier };
       }
+
+      const errMsg = data.error || 'خطا در ذخیره اطلاعات پیش‌نویس';
+      if (res.status >= 400 && res.status < 500) {
+        if (!silent) {
+          setFieldErrors({ global: errMsg });
+        }
+        setSyncStatus('local_saved');
+        return { status: 'validation_error', message: errMsg };
+      }
+
+      setSyncStatus('sync_error');
+      return { status: 'network_error' };
     } catch {
-      // ignore transient network error
+      const onlineNow = typeof navigator !== 'undefined' ? navigator.onLine : false;
+      setIsOnline(onlineNow);
+      persistCurrentFormLocally(targetStep, true);
+      setSyncStatus(onlineNow ? 'sync_error' : 'offline_saved');
+      return { status: 'network_error' };
+    } finally {
+      inFlightSyncRef.current = false;
     }
-    return null;
   };
+
+  syncFnRef.current = syncDraftToServer;
 
   const handleNextStep = async () => {
     if (!validateCurrentStep(currentStep)) return;
-    const nextStep = Math.min(9, currentStep + 1);
-    const saved = await triggerAutoSave(nextStep);
-    if (saved) {
+    const currentIdx = activeSteps.findIndex((s) => s.step === currentStep);
+    const nextStep =
+      currentIdx >= 0 && currentIdx < activeSteps.length - 1
+        ? activeSteps[currentIdx + 1].step
+        : 9;
+
+    // Always persist locally immediately so progress is never lost even offline
+    persistCurrentFormLocally(nextStep, true);
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setIsOnline(false);
+      setSyncStatus('offline_saved');
       setCurrentStep(nextStep);
+      setHighestReachedStep((prev) => Math.max(prev, nextStep));
       window.scrollTo({ top: 0, behavior: 'smooth' });
+      return;
     }
+
+    const result = await syncDraftToServer(nextStep, { silent: false });
+    if (result.status === 'validation_error') {
+      return;
+    }
+
+    setCurrentStep(nextStep);
+    setHighestReachedStep((prev) => Math.max(prev, nextStep));
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handlePrevStep = () => {
     setFieldErrors({});
-    setCurrentStep((prev) => Math.max(1, prev - 1));
+    const currentIdx = activeSteps.findIndex((s) => s.step === currentStep);
+    const prevStep = currentIdx > 0 ? activeSteps[currentIdx - 1].step : activeSteps[0]?.step || 1;
+    setCurrentStep(prevStep);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleDiscardLocalDraft = () => {
+    const cleanNat = toEnglishDigits(nationalCode).trim();
+    clearApplicantDraft(cleanNat);
+    setRestoredDraftInfo(null);
+    setFieldErrors({});
+    pendingSyncRef.current = false;
+    setLastLocalSavedAt(null);
+    setLastServerSyncedAt(null);
+
+    if (isEditingSubmitted && activeDossier) {
+      populateFormFromDossier(activeDossier);
+      setCurrentStep(1);
+      setHighestReachedStep(9);
+      setSyncStatus('synced');
+    } else {
+      suppressAutoSaveRef.current = true;
+      setActiveDossier(null);
+      setIsEditingSubmitted(false);
+      setCurrentStep(1);
+      setHighestReachedStep(1);
+      setFirstName('');
+      setLastName('');
+      setGender('زن');
+      setBirthDateJalali('1379/04/15');
+      setCalculatedAge(26);
+      setMaritalStatus('مجرد');
+      setMilitaryStatus('');
+      setFatherName('');
+      setFatherAliveStatus('در قید حیات');
+      setFatherJob('');
+      setEducationList([{ major: '', degree_level: 'کارشناسی', university_name: '', study_city: 'شوشتر' }]);
+      setCity('شوشتر');
+      setDistrictInputMode('list');
+      setDistrict(config.company_districts[0] || 'مرکز شهر شوشتر');
+      setFullAddress('');
+      setContactsList([{ full_name: '', relationship: 'پدر', mobile: '' }]);
+      setHasWorkExperience(false);
+      setWorkList([
+        {
+          company_name: '',
+          job_title: '',
+          duration_text: '',
+          duration_months: 12,
+          responsibilities: '',
+          leaving_reason: '',
+        },
+      ]);
+      setAcquaintanceSource(ACQUAINTANCE_SOURCES[0]);
+      setAcquaintanceNote('');
+      setProposedSalaryToman(12000000);
+      setResumeText('');
+      setSyncStatus('idle');
+      releaseAutoSaveSuppressionSoon();
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleStartEditSubmitted = () => {
+    if (!activeDossier) return;
+    populateFormFromDossier(activeDossier);
+    setFieldErrors({});
+    setRestoredDraftInfo(null);
+    setEditSavedNotice(false);
+    setRegistrationSmsNotice(false);
+    setIsEditingSubmitted(true);
+    setHighestReachedStep(9);
+    setCurrentStep(1);
+    setSyncStatus('synced');
+    pendingSyncRef.current = false;
+    setViewMode('FORM');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleCancelEditSubmitted = () => {
+    clearApplicantDraft(nationalCode);
+    setRestoredDraftInfo(null);
+    pendingSyncRef.current = false;
+    setSyncStatus('idle');
+    if (activeDossier) {
+      populateFormFromDossier(activeDossier);
+    }
+    setFieldErrors({});
+    setIsEditingSubmitted(false);
+    setViewMode('TRACKING');
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+
+  const handleApplicantLogout = () => {
+    suppressAutoSaveRef.current = true;
+    clearApplicantDraft(nationalCode || entryNationalCode);
+    clearApplicantDraft();
+    pendingSyncRef.current = false;
+    setRestoredDraftInfo(null);
+    setLastLocalSavedAt(null);
+    setLastServerSyncedAt(null);
+    setSyncStatus('idle');
+
+    setShowProfileModal(false);
+    setShowReceiptModal(false);
+    setViewMode('ENTRY');
+    setActiveDossier(null);
+    setIsEditingSubmitted(false);
+    setCurrentStep(1);
+    setHighestReachedStep(1);
+    setFieldErrors({});
+    setRegistrationSmsNotice(false);
+    setEditSavedNotice(false);
+    setEntryNationalCode('');
+    setEntryMobile('');
+    setEntryError('');
+    setOtpChallengeId('');
+    setOtpMaskedMobile('');
+    setOtpCode('');
+    setOtpExpirySeconds(0);
+    setOtpResendSeconds(0);
+    lastAutoSubmittedOtpRef.current = '';
+
+    setFirstName('');
+    setLastName('');
+    setNationalCode('');
+    setGender('زن');
+    setBirthDateJalali('1379/04/15');
+    setCalculatedAge(26);
+    setMaritalStatus('مجرد');
+    setMilitaryStatus('');
+    setFatherName('');
+    setFatherAliveStatus('در قید حیات');
+    setFatherJob('');
+    setMobile('');
+    setEducationList([{ major: '', degree_level: 'کارشناسی', university_name: '', study_city: 'شوشتر' }]);
+    setCity('شوشتر');
+    setDistrictInputMode('list');
+    setDistrict(config.company_districts[0] || 'مرکز شهر شوشتر');
+    setFullAddress('');
+    setContactsList([{ full_name: '', relationship: 'پدر', mobile: '' }]);
+    setHasWorkExperience(false);
+    setWorkList([
+      {
+        company_name: '',
+        job_title: '',
+        duration_text: '',
+        duration_months: 12,
+        responsibilities: '',
+        leaving_reason: '',
+      },
+    ]);
+    setAcquaintanceSource(ACQUAINTANCE_SOURCES[0]);
+    setAcquaintanceNote('');
+    setProposedSalaryToman(12000000);
+    setResumeText('');
+    releaseAutoSaveSuppressionSoon();
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleFinalSubmit = async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setIsOnline(false);
+      persistCurrentFormLocally(9, true);
+      setSyncStatus('offline_saved');
+      setFieldErrors({
+        global:
+          'اتصال اینترنت برقرار نیست. اطلاعات شما به‌صورت ایمن در مرورگر ذخیره شده و بلافاصله پس از وصل شدن اینترنت می‌توانید ثبت نهایی را انجام دهید.',
+      });
+      return;
+    }
+
     setIsLoading(true);
     setFieldErrors({});
     try {
-      const saved = await triggerAutoSave(9);
-      const appId = saved?.application_id || activeDossier?.application_id;
+      const syncResult = await syncDraftToServer(9, { silent: false });
+      if (syncResult.status === 'validation_error') {
+        return;
+      }
+      if (syncResult.status === 'network_error') {
+        setFieldErrors({
+          global:
+            'ارتباط با سرور برقرار نشد. اطلاعات شما به‌صورت محلی ذخیره شده است؛ لطفاً پس از برقراری اینترنت مجدداً تلاش کنید.',
+        });
+        return;
+      }
+
+      const appId = syncResult.dossier.application_id || activeDossier?.application_id;
       if (!appId) {
         setFieldErrors({ global: 'ابتدا اطلاعات مراحل قبل را تکمیل نمایید.' });
         return;
@@ -521,60 +1170,153 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         return;
       }
 
+      // Privacy cleanup: purge browser local draft immediately after final submission
+      clearApplicantDraft(nationalCode);
+      pendingSyncRef.current = false;
+      setRestoredDraftInfo(null);
+      setLastLocalSavedAt(null);
+      setSyncStatus('synced');
+
       setActiveDossier(data.dossier);
       setIsEditingSubmitted(false);
-      setRegistrationSmsNotice(Boolean(data.sms_dispatched));
+      setEditSavedNotice(Boolean(data.edited));
+      setRegistrationSmsNotice(!data.edited && Boolean(data.sms_dispatched));
       setViewMode('TRACKING');
+    } catch {
+      setFieldErrors({
+        global: 'خطا در ارتباط با سرور هنگام ثبت نهایی. پیش‌نویس شما در مرورگر حفظ شده است.',
+      });
     } finally {
       setIsLoading(false);
     }
   };
 
-  const completionPercentage = Math.round(((currentStep - 1) / 8) * 100);
+  const currentActiveIndex = Math.max(
+    0,
+    activeSteps.findIndex((s) => s.step === currentStep)
+  );
+  const currentStepMeta = activeSteps[currentActiveIndex] || activeSteps[0];
+  const completionPercentage = isEditingSubmitted
+    ? 100
+    : Math.round((currentActiveIndex / Math.max(1, activeSteps.length - 1)) * 100);
 
   return (
     <div className="min-h-screen bg-slate-100 dark:bg-slate-950 text-slate-900 dark:text-slate-100">
       {/* Top Bar Following Strict 3-Zone Contract */}
-      <header className="flex items-center justify-between gap-8 px-6 py-4 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
+      <header className="flex items-center justify-between gap-4 sm:gap-8 px-4 sm:px-6 py-4 bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800">
         <a
           href="#top"
           onClick={(e) => {
             e.preventDefault();
-            setViewMode('ENTRY');
+            if (viewMode === 'ENTRY') {
+              setViewMode('ENTRY');
+            } else if (activeDossier?.is_submitted === 1) {
+              setIsEditingSubmitted(false);
+              setViewMode('TRACKING');
+            }
           }}
-          className="text-lg font-extrabold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0"
+          className="text-base sm:text-lg font-extrabold tracking-tight text-slate-900 dark:text-white whitespace-nowrap shrink-0"
         >
           سامانه استخدام شرکت دستوا
         </a>
 
         <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600 dark:text-slate-300">
-          <button
-            type="button"
-            onClick={() => {
-              setViewMode('ENTRY');
-            }}
-            className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
-          >
-            ثبت درخواست / پیگیری وضعیت پرونده
-          </button>
-          <a
-            href="#conditions"
-            className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0"
-          >
-            شرایط همکاری
-          </a>
-          <a
-            href="#process"
-            className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0"
-          >
-            مراحل جذب
-          </a>
+          {viewMode === 'ENTRY' ? (
+            <>
+              <button
+                type="button"
+                onClick={() => setViewMode('ENTRY')}
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+              >
+                ثبت درخواست / پیگیری وضعیت پرونده
+              </button>
+              <a
+                href="#conditions"
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0"
+              >
+                شرایط همکاری
+              </a>
+              <a
+                href="#process"
+                className="hover:text-blue-600 dark:hover:text-blue-400 transition-colors whitespace-nowrap shrink-0"
+              >
+                مراحل جذب
+              </a>
+            </>
+          ) : (
+            <>
+              {activeDossier?.is_submitted === 1 && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditingSubmitted(false);
+                    setViewMode('TRACKING');
+                  }}
+                  className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    viewMode === 'TRACKING'
+                      ? 'text-blue-600 dark:text-blue-400 font-bold'
+                      : 'hover:text-blue-600 dark:hover:text-blue-400'
+                  }`}
+                >
+                  پیگیری وضعیت و رسید
+                </button>
+              )}
+              {(activeDossier?.is_submitted !== 1 ||
+                !(
+                  activeDossier.is_terminal === 1 ||
+                  ['HIRED', 'REJECTED', 'APPLICANT_WITHDRAWN'].includes(activeDossier.status_code)
+                )) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (activeDossier?.is_submitted === 1) {
+                      handleStartEditSubmitted();
+                    } else {
+                      setViewMode('FORM');
+                    }
+                  }}
+                  className={`transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
+                    viewMode === 'FORM'
+                      ? 'text-blue-600 dark:text-blue-400 font-bold'
+                      : 'hover:text-blue-600 dark:hover:text-blue-400'
+                  }`}
+                >
+                  {activeDossier?.is_submitted === 1 ? 'ویرایش اطلاعات ثبت‌نامی' : 'فرم ثبت‌نام استخدام'}
+                </button>
+              )}
+            </>
+          )}
         </nav>
 
-        <div className="flex items-center gap-3 shrink-0">
-          <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
-            درگاه رسمی جذب و استخدام
-          </span>
+        <div className="flex items-center gap-2 shrink-0">
+          {viewMode === 'ENTRY' ? (
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+              درگاه رسمی جذب و استخدام
+            </span>
+          ) : (
+            <>
+              <button
+                type="button"
+                onClick={() => setShowProfileModal(true)}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-700 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <User className="w-3.5 h-3.5 text-blue-600 dark:text-blue-400 shrink-0" />
+                <span className="hidden sm:inline">
+                  {firstName || lastName ? `${firstName} ${lastName}`.trim() : 'پروفایل کاربری'}
+                </span>
+                <span className="sm:hidden">پروفایل</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleApplicantLogout}
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-bold text-rose-600 dark:text-rose-400 border border-rose-200 dark:border-rose-800 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/40 transition-colors whitespace-nowrap cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5 shrink-0" />
+                <span className="hidden sm:inline">خروج از حساب کاربری</span>
+                <span className="sm:hidden">خروج</span>
+              </button>
+            </>
+          )}
         </div>
       </header>
 
@@ -621,7 +1363,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                 </div>
 
                 <div id="process" className="mt-6 pt-5 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500 dark:text-slate-400">
-                  <span>۰۱. تکمیل فرم ۹ مرحله‌ای</span>
+                  <span className="tabular-nums">۰۱. تکمیل فرم {toPersianDigits(activeSteps.length)} مرحله‌ای</span>
                   <span>·</span>
                   <span>۰۲. بررسی رزومه در منابع انسانی</span>
                   <span>·</span>
@@ -722,15 +1464,19 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                         <input
                           type="text"
                           inputMode="numeric"
+                          autoComplete="one-time-code"
                           dir="ltr"
                           maxLength={6}
                           autoFocus
                           value={otpCode}
-                          onChange={(e) => setOtpCode(e.target.value)}
+                          onChange={(e) => handleApplicantOtpInputChange(e.target.value)}
                           placeholder="• • • • • •"
                           required
                           className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-3 text-center text-lg font-mono tracking-[0.5em] tabular-nums focus:border-blue-600 focus:outline-none"
                         />
+                        <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-1.5">
+                          با وارد کردن رقم ششم، بررسی کد و ورود به سامانه به‌صورت خودکار انجام می‌شود.
+                        </p>
                       </div>
 
                       {entryError && (
@@ -746,7 +1492,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                         className="w-full flex items-center justify-center gap-2 rounded-lg bg-blue-600 px-5 py-3 text-sm font-bold text-white hover:bg-blue-700 transition-colors cursor-pointer disabled:opacity-60"
                       >
                         <CheckCircle2 className="w-4 h-4" />
-                        <span>{isLoading ? 'در حال تایید کد...' : 'تایید کد و ورود به سامانه'}</span>
+                        <span>{isLoading ? 'در حال تایید خودکار کد...' : 'تایید کد و ورود به سامانه'}</span>
                       </button>
 
                       <div className="flex items-center justify-between pt-1 text-xs">
@@ -765,6 +1511,7 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                           onClick={() => {
                             setOtpChallengeId('');
                             setOtpCode('');
+                            lastAutoSubmittedOtpRef.current = '';
                             setEntryError('');
                           }}
                           className="font-semibold text-slate-500 hover:text-slate-800 dark:hover:text-slate-200 cursor-pointer"
@@ -787,24 +1534,168 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         {/* VIEW 2: 9-STEP MULTI-STEP RECRUITMENT FORM */}
         {viewMode === 'FORM' && (
           <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 sm:p-8">
+            {/* Offline Auto-Save Resilience Banner */}
+            {!isOnline && (
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/80 dark:bg-amber-950/30 px-4 py-3 text-xs">
+                <div className="flex items-start gap-2.5 text-amber-900 dark:text-amber-200">
+                  <WifiOff className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                  <div className="leading-relaxed">
+                    <span className="font-bold block">اتصال اینترنت قطع است — ذخیره خودکار محلی فعال است</span>
+                    <span className="text-amber-800/90 dark:text-amber-300/90">
+                      تمام اطلاعات واردشده به‌صورت لحظه‌ای در مرورگر شما حفظ می‌شود و می‌توانید به تکمیل مراحل ادامه دهید؛ به محض وصل شدن اینترنت همگام‌سازی با سرور خودکار انجام خواهد شد.
+                    </span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Auto-Restored Draft Banner with Discard & Restart Action */}
+            {restoredDraftInfo && (
+              <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60 px-4 py-3 text-xs">
+                <div className="flex items-start gap-2.5 text-slate-800 dark:text-slate-200">
+                  <RotateCcw className="w-4 h-4 shrink-0 mt-0.5 text-blue-600 dark:text-blue-400" />
+                  <div className="leading-relaxed">
+                    <span className="font-bold">
+                      پیش‌نویس ذخیره‌شده در مرورگر بازیابی شد
+                      {restoredDraftInfo.savedAt
+                        ? ` (آخرین ذخیره ساعت ${formatDraftClockPersian(restoredDraftInfo.savedAt)})`
+                        : ''}
+                    </span>
+                    <p className="text-slate-600 dark:text-slate-400 mt-0.5">
+                      {restoredDraftInfo.wasPendingSync
+                        ? 'تغییرات ذخیره‌شده آماده همگام‌سازی با سرور است. می‌توانید ادامه دهید یا فرم را از ابتدا شروع کنید.'
+                        : 'می‌توانید ثبت‌نام را از همین مرحله ادامه دهید یا پیش‌نویس محلی را پاک کنید.'}
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={handleDiscardLocalDraft}
+                    className="rounded-lg border border-rose-300 dark:border-rose-800 bg-white dark:bg-slate-900 px-3 py-1.5 font-bold text-rose-700 dark:text-rose-300 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer whitespace-nowrap"
+                  >
+                    پاک‌سازی پیش‌نویس و شروع مجدد
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setRestoredDraftInfo(null)}
+                    className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-1.5 font-semibold text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer whitespace-nowrap"
+                  >
+                    متوجه شدم
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Edit Mode or Resume Incomplete Banner */}
+            {isEditingSubmitted && activeDossier && (
+              <div className="mb-6 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-blue-200 dark:border-blue-900 bg-blue-50/70 dark:bg-blue-950/30 px-4 py-3 text-xs">
+                <div className="flex items-center gap-2 text-blue-800 dark:text-blue-300 font-bold">
+                  <Edit3 className="w-4 h-4 shrink-0" />
+                  <span>
+                    حالت ویرایش اطلاعات ثبت‌نامی فعال است — می‌توانید آزادانه بین تمام{' '}
+                    {toPersianDigits(activeSteps.length)} تب فعال جابه‌جا شده و در مرحله پایانی تغییرات را ذخیره کنید.
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleCancelEditSubmitted}
+                  className="rounded-lg border border-blue-300 dark:border-blue-800 bg-white dark:bg-slate-900 px-3 py-1.5 font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-100/60 cursor-pointer whitespace-nowrap"
+                >
+                  بازگشت به صفحه پیگیری پرونده
+                </button>
+              </div>
+            )}
+
+            {!isEditingSubmitted && !restoredDraftInfo && activeDossier && activeDossier.is_submitted === 0 && (
+              <div className="mb-6 flex items-center gap-2 rounded-xl border border-amber-200 dark:border-amber-900 bg-amber-50/70 dark:bg-amber-950/30 px-4 py-3 text-xs font-bold text-amber-800 dark:text-amber-300">
+                <Clock className="w-4 h-4 shrink-0" />
+                <span>
+                  پرونده ثبت‌نامی ناتمام شما بازیابی شد. می‌توانید از همین مرحله مابقی فرآیند ثبت‌نام را تکمیل و ثبت نهایی کنید.
+                </span>
+              </div>
+            )}
+
             {/* Progress Bar & Percentage Header */}
             <div className="mb-8">
-              <div className="flex flex-wrap items-center justify-between gap-2 mb-3">
+              <div className="flex flex-wrap items-center justify-between gap-3 mb-3">
                 <div>
-                  <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">
-                    مرحله {toPersianDigits(currentStep)} از ۹ · {STEP_TITLES[currentStep - 1].title}
+                  <span className="text-xs font-semibold text-blue-600 dark:text-blue-400 tabular-nums">
+                    مرحله {toPersianDigits(currentActiveIndex + 1)} از {toPersianDigits(activeSteps.length)} ·{' '}
+                    {currentStepMeta?.title}
                   </span>
                   <h2 className="text-lg font-extrabold text-slate-900 dark:text-white mt-0.5">
-                    فرم جامع درخواست استخدام شرکت دستوا
+                    {isEditingSubmitted
+                      ? 'ویرایش اطلاعات پرونده استخدامی شرکت دستوا'
+                      : 'فرم جامع درخواست استخدام شرکت دستوا'}
                   </h2>
                 </div>
-                <div className="flex items-center gap-4">
-                  {autoSaveToast && (
-                    <span className="text-xs text-emerald-600 dark:text-emerald-400 flex items-center gap-1">
-                      <Save className="w-3.5 h-3.5" />
-                      {autoSaveToast}
-                    </span>
-                  )}
+                <div className="flex flex-wrap items-center gap-4">
+                  {/* Inline Zero-Pill Auto-Save & Sync Status Indicator */}
+                  <div className="flex items-center gap-2 text-xs tabular-nums">
+                    {syncStatus === 'offline_saved' && (
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-400">
+                        <WifiOff className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          آفلاین · ذخیره محلی
+                          {lastLocalSavedAt ? ` (${formatDraftClockPersian(lastLocalSavedAt)})` : ''}
+                        </span>
+                      </span>
+                    )}
+                    {syncStatus === 'syncing' && (
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-blue-600 dark:text-blue-400">
+                        <RefreshCw className="w-3.5 h-3.5 shrink-0 animate-spin" />
+                        <span>در حال همگام‌سازی با سرور...</span>
+                      </span>
+                    )}
+                    {syncStatus === 'synced' && (
+                      <span className="inline-flex items-center gap-1.5 font-semibold text-emerald-700 dark:text-emerald-400">
+                        <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                        <span>
+                          همگام با سرور
+                          {lastServerSyncedAt ? ` (${formatDraftClockPersian(lastServerSyncedAt)})` : ''}
+                        </span>
+                      </span>
+                    )}
+                    {syncStatus === 'local_saved' && (
+                      <>
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-slate-600 dark:text-slate-300">
+                          <Save className="w-3.5 h-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                          <span>
+                            ذخیره خودکار در مرورگر
+                            {lastLocalSavedAt ? ` (${formatDraftClockPersian(lastLocalSavedAt)})` : ''}
+                          </span>
+                        </span>
+                        {isOnline && (
+                          <button
+                            type="button"
+                            onClick={() => void syncDraftToServer(currentStep, { silent: false })}
+                            className="text-blue-600 dark:text-blue-400 font-bold hover:underline cursor-pointer"
+                          >
+                            همگام‌سازی اکنون
+                          </button>
+                        )}
+                      </>
+                    )}
+                    {syncStatus === 'sync_error' && (
+                      <>
+                        <span className="inline-flex items-center gap-1.5 font-semibold text-amber-700 dark:text-amber-400">
+                          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                          <span>ذخیره در مرورگر (خطا در اتصال سرور)</span>
+                        </span>
+                        {isOnline && (
+                          <button
+                            type="button"
+                            onClick={() => void syncDraftToServer(currentStep, { silent: false })}
+                            className="text-blue-600 dark:text-blue-400 font-bold hover:underline cursor-pointer"
+                          >
+                            تلاش مجدد
+                          </button>
+                        )}
+                      </>
+                    )}
+                  </div>
+
                   <div className="text-left">
                     <span className="text-xs text-slate-500 dark:text-slate-400">درصد تکمیل فرم: </span>
                     <span className="text-sm font-extrabold text-blue-600 dark:text-blue-400 tabular-nums">
@@ -823,26 +1714,33 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
               </div>
 
               {/* Stepper Navigation Buttons */}
-              <div className="grid grid-cols-3 sm:grid-cols-9 gap-1.5 mt-4">
-                {STEP_TITLES.map((s) => {
+              <div
+                className={`grid ${STEPPER_GRID_COLS[activeSteps.length] || 'grid-cols-3 sm:grid-cols-9'} gap-1.5 mt-4`}
+              >
+                {activeSteps.map((s, activeIdx) => {
                   const isActive = s.step === currentStep;
-                  const isDone = s.step < currentStep;
+                  const isClickable = isEditingSubmitted || s.step <= highestReachedStep;
+                  const isDone = isEditingSubmitted ? s.step !== currentStep : activeIdx < currentActiveIndex;
                   return (
                     <button
                       key={s.step}
                       type="button"
+                      disabled={!isClickable}
                       onClick={() => {
-                        if (s.step < currentStep) setCurrentStep(s.step);
+                        if (isClickable) {
+                          setFieldErrors({});
+                          setCurrentStep(s.step);
+                        }
                       }}
-                      className={`text-right px-2.5 py-2 rounded-lg border text-[11px] transition-colors cursor-pointer ${
+                      className={`text-right px-2.5 py-2 rounded-lg border text-[11px] transition-colors ${
                         isActive
-                          ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 font-bold'
-                          : isDone
-                          ? 'border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 font-medium'
-                          : 'border-slate-200 dark:border-slate-800 text-slate-400'
+                          ? 'border-blue-600 bg-blue-50 dark:bg-blue-950/50 text-blue-700 dark:text-blue-300 font-bold cursor-pointer'
+                          : isDone || isClickable
+                          ? 'border-emerald-200 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/20 text-emerald-700 dark:text-emerald-400 font-medium hover:border-blue-400 cursor-pointer'
+                          : 'border-slate-200 dark:border-slate-800 text-slate-400 cursor-not-allowed opacity-70'
                       }`}
                     >
-                      <div className="tabular-nums font-bold">{toPersianDigits(s.step)}</div>
+                      <div className="tabular-nums font-bold">{toPersianDigits(activeIdx + 1)}</div>
                       <div className="truncate">{s.title}</div>
                     </button>
                   );
@@ -887,9 +1785,15 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                     <input
                       type="text"
                       maxLength={10}
+                      readOnly={isEditingSubmitted}
+                      disabled={isEditingSubmitted}
                       value={nationalCode}
                       onChange={(e) => setNationalCode(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums"
+                      className={`w-full rounded-lg border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-sm tabular-nums ${
+                        isEditingSubmitted
+                          ? 'bg-slate-100 dark:bg-slate-800/50 text-slate-500 cursor-not-allowed'
+                          : 'bg-white dark:bg-slate-800'
+                      }`}
                     />
                     {fieldErrors.nationalCode && <p className="text-xs text-rose-600 mt-1">{fieldErrors.nationalCode}</p>}
                   </div>
@@ -908,12 +1812,11 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
 
                   <div>
                     <label className="block text-xs font-semibold mb-1.5">۵. تاریخ تولد شمسی (سال/ماه/روز) *</label>
-                    <input
-                      type="text"
+                    <JalaliDatePicker
                       value={birthDateJalali}
-                      onChange={(e) => setBirthDateJalali(e.target.value)}
+                      onChange={setBirthDateJalali}
                       placeholder="1379/04/15"
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums"
+                      hasError={Boolean(fieldErrors.birthDateJalali)}
                     />
                     {fieldErrors.birthDateJalali && <p className="text-xs text-rose-600 mt-1">{fieldErrors.birthDateJalali}</p>}
                   </div>
@@ -1606,83 +2509,171 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
             )}
 
             {/* STEP 9: REVIEW & FINAL SUBMIT */}
-            {currentStep === 9 && (
-              <div className="space-y-6">
-                <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
-                  <div>
-                    <h3 className="text-sm font-bold">بازبینی نهایی اطلاعات پیش از ثبت قطعی</h3>
-                    <p className="text-xs text-slate-500 mt-0.5">
-                      لطفاً خلاصه اطلاعات واردشده را بررسی کنید. در صورت نیاز به اصلاح هر بخش، روی دکمه «ویرایش» همان بخش کلیک کنید.
-                    </p>
-                  </div>
-                </div>
+            {currentStep === 9 && (() => {
+              const showEduOrRes = isStepEnabled(2) || isStepEnabled(3);
+              const showContactsOrWork = isStepEnabled(4) || isStepEnabled(5);
+              const showExtraOrResume = isStepEnabled(6) || isStepEnabled(7) || isStepEnabled(8);
+              let cardIndex = 1;
+              const identityIdx = cardIndex++;
+              const eduResIdx = showEduOrRes ? cardIndex++ : 0;
+              const contactsWorkIdx = showContactsOrWork ? cardIndex++ : 0;
+              const extraResumeIdx = showExtraOrResume ? cardIndex++ : 0;
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
-                  <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
-                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                      <span className="font-bold text-slate-900 dark:text-white">۱. اطلاعات هویتی</span>
-                      <button type="button" onClick={() => setCurrentStep(1)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
-                        <Edit3 className="w-3.5 h-3.5" /> ویرایش
-                      </button>
-                    </div>
-                    <p>نام و نام خانوادگی: <strong>{firstName} {lastName}</strong></p>
-                    <p className="tabular-nums">کد ملی: <strong>{toPersianDigits(nationalCode)}</strong> · موبایل: <strong>{toPersianDigits(mobile)}</strong></p>
-                    <p className="tabular-nums">جنسیت: {gender} · تاریخ تولد: {toPersianDigits(birthDateJalali)} ({toPersianDigits(calculatedAge)} سال)</p>
-                    <p>وضعیت تأهل: {maritalStatus} {gender === 'مرد' ? `· نظام وظیفه: ${militaryStatus}` : ''}</p>
-                    <p>نام پدر: {fatherName} ({fatherAliveStatus}) · شغل پدر: {fatherJob}</p>
-                  </div>
-
-                  <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
-                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                      <span className="font-bold text-slate-900 dark:text-white">۲. تحصیلات و سکونت</span>
-                      <button type="button" onClick={() => setCurrentStep(2)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
-                        <Edit3 className="w-3.5 h-3.5" /> ویرایش
-                      </button>
-                    </div>
-                    {educationList.map((e, i) => (
-                      <p key={i}>تحصیلات: <strong>{e.degree_level} {e.major}</strong> ({e.university_name} - {e.study_city})</p>
-                    ))}
-                    <p>شهرستان و منطقه: <strong>{city} - {district}</strong></p>
-                    <p>آدرس: {fullAddress}</p>
-                  </div>
-
-                  <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
-                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                      <span className="font-bold text-slate-900 dark:text-white">۳. بستگان و سوابق شغلی</span>
-                      <button type="button" onClick={() => setCurrentStep(4)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
-                        <Edit3 className="w-3.5 h-3.5" /> ویرایش
-                      </button>
-                    </div>
-                    {contactsList.map((c, i) => (
-                      <p key={i} className="tabular-nums">بستگان: {c.full_name} ({c.relationship}) - {toPersianDigits(c.mobile)}</p>
-                    ))}
-                    <p>
-                      سابقه شغلی: {hasWorkExperience ? `${toPersianDigits(workList.length)} مورد ثبت‌شده` : 'فاقد سابقه شغلی'}
-                    </p>
-                  </div>
-
-                  <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
-                    <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
-                      <span className="font-bold text-slate-900 dark:text-white">۴. شرایط مالی و رزومه</span>
-                      <button type="button" onClick={() => setCurrentStep(8)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
-                        <Edit3 className="w-3.5 h-3.5" /> ویرایش رزومه
-                      </button>
-                    </div>
-                    <p>نحوه آشنایی: {acquaintanceSource}</p>
-                    <p className="tabular-nums">حقوق پیشنهادی ماهانه: <strong>{formatToman(proposedSalaryToman)} تومان</strong></p>
+              return (
+                <div className="space-y-6">
+                  <div className="p-4 rounded-lg bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-800 flex items-center justify-between">
                     <div>
-                      <span className="text-slate-500 block mb-1">متن رزومه ثبت‌شده:</span>
-                      <p className="p-2.5 rounded bg-slate-50 dark:bg-slate-800/60 whitespace-pre-line leading-relaxed">
-                        {resumeText.trim() ? resumeText : 'متن رزومه ثبت نشده است.'}
+                      <h3 className="text-sm font-bold">بازبینی نهایی اطلاعات پیش از ثبت قطعی</h3>
+                      <p className="text-xs text-slate-500 mt-0.5">
+                        لطفاً خلاصه اطلاعات واردشده را بررسی کنید. در صورت نیاز به اصلاح هر بخش، روی دکمه «ویرایش» همان بخش کلیک کنید.
                       </p>
                     </div>
                   </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs">
+                    <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
+                      <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                        <span className="font-bold text-slate-900 dark:text-white">
+                          {toPersianDigits(identityIdx)}. اطلاعات هویتی
+                        </span>
+                        <button type="button" onClick={() => setCurrentStep(1)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
+                          <Edit3 className="w-3.5 h-3.5" /> ویرایش
+                        </button>
+                      </div>
+                      <p>نام و نام خانوادگی: <strong>{firstName} {lastName}</strong></p>
+                      <p className="tabular-nums">کد ملی: <strong>{toPersianDigits(nationalCode)}</strong> · موبایل: <strong>{toPersianDigits(mobile)}</strong></p>
+                      <p className="tabular-nums">جنسیت: {gender} · تاریخ تولد: {toPersianDigits(birthDateJalali)} ({toPersianDigits(calculatedAge)} سال)</p>
+                      <p>وضعیت تأهل: {maritalStatus} {gender === 'مرد' ? `· نظام وظیفه: ${militaryStatus}` : ''}</p>
+                      <p>نام پدر: {fatherName} ({fatherAliveStatus}) · شغل پدر: {fatherJob}</p>
+                    </div>
+
+                    {showEduOrRes && (
+                      <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
+                        <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                          <span className="font-bold text-slate-900 dark:text-white">
+                            {toPersianDigits(eduResIdx)}.{' '}
+                            {isStepEnabled(2) && isStepEnabled(3)
+                              ? 'تحصیلات و سکونت'
+                              : isStepEnabled(2)
+                              ? 'اطلاعات تحصیلی'
+                              : 'محل سکونت'}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            {isStepEnabled(2) && (
+                              <button type="button" onClick={() => setCurrentStep(2)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
+                                <Edit3 className="w-3.5 h-3.5" /> {isStepEnabled(3) ? 'تحصیلات' : 'ویرایش'}
+                              </button>
+                            )}
+                            {isStepEnabled(3) && (
+                              <button type="button" onClick={() => setCurrentStep(3)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
+                                <Edit3 className="w-3.5 h-3.5" /> {isStepEnabled(2) ? 'سکونت' : 'ویرایش'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {isStepEnabled(2) &&
+                          educationList.map((e, i) => (
+                            <p key={i}>تحصیلات: <strong>{e.degree_level} {e.major}</strong> ({e.university_name} - {e.study_city})</p>
+                          ))}
+                        {isStepEnabled(3) && (
+                          <>
+                            <p>شهرستان و منطقه: <strong>{city} - {district}</strong></p>
+                            <p>آدرس: {fullAddress}</p>
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    {showContactsOrWork && (
+                      <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
+                        <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                          <span className="font-bold text-slate-900 dark:text-white">
+                            {toPersianDigits(contactsWorkIdx)}.{' '}
+                            {isStepEnabled(4) && isStepEnabled(5)
+                              ? 'بستگان و سوابق شغلی'
+                              : isStepEnabled(4)
+                              ? 'بستگان و معرف'
+                              : 'سوابق شغلی'}
+                          </span>
+                          <div className="flex items-center gap-3">
+                            {isStepEnabled(4) && (
+                              <button type="button" onClick={() => setCurrentStep(4)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
+                                <Edit3 className="w-3.5 h-3.5" /> {isStepEnabled(5) ? 'بستگان' : 'ویرایش'}
+                              </button>
+                            )}
+                            {isStepEnabled(5) && (
+                              <button type="button" onClick={() => setCurrentStep(5)} className="text-blue-600 flex items-center gap-1 cursor-pointer">
+                                <Edit3 className="w-3.5 h-3.5" /> {isStepEnabled(4) ? 'سوابق' : 'ویرایش'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {isStepEnabled(4) &&
+                          contactsList.map((c, i) => (
+                            <p key={i} className="tabular-nums">بستگان: {c.full_name} ({c.relationship}) - {toPersianDigits(c.mobile)}</p>
+                          ))}
+                        {isStepEnabled(5) && (
+                          <p>
+                            سابقه شغلی: {hasWorkExperience ? `${toPersianDigits(workList.length)} مورد ثبت‌شده` : 'فاقد سابقه شغلی'}
+                          </p>
+                        )}
+                      </div>
+                    )}
+
+                    {showExtraOrResume && (
+                      <div className="border border-slate-200 dark:border-slate-800 rounded-lg p-4 space-y-2">
+                        <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-2">
+                          <span className="font-bold text-slate-900 dark:text-white">
+                            {toPersianDigits(extraResumeIdx)}.{' '}
+                            {[
+                              isStepEnabled(6) ? 'آشنایی' : '',
+                              isStepEnabled(7) ? 'شرایط مالی' : '',
+                              isStepEnabled(8) ? 'رزومه' : '',
+                            ]
+                              .filter(Boolean)
+                              .join('، ')}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setCurrentStep(isStepEnabled(8) ? 8 : isStepEnabled(7) ? 7 : 6)}
+                            className="text-blue-600 flex items-center gap-1 cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" /> ویرایش
+                          </button>
+                        </div>
+                        {isStepEnabled(6) && <p>نحوه آشنایی: {acquaintanceSource}</p>}
+                        {isStepEnabled(7) && (
+                          <p className="tabular-nums">
+                            حقوق پیشنهادی ماهانه: <strong>{formatToman(proposedSalaryToman)} تومان</strong>
+                          </p>
+                        )}
+                        {isStepEnabled(8) && (
+                          <div>
+                            <span className="text-slate-500 block mb-1">متن رزومه ثبت‌شده:</span>
+                            <p className="p-2.5 rounded bg-slate-50 dark:bg-slate-800/60 whitespace-pre-line leading-relaxed">
+                              {resumeText.trim() ? resumeText : 'متن رزومه ثبت نشده است.'}
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
+              );
+            })()}
+
+            {/* Step 9 Offline Notice */}
+            {currentStep === 9 && !isOnline && (
+              <div className="mt-6 flex items-start gap-2.5 rounded-xl border border-amber-200 dark:border-amber-800 bg-amber-50/70 dark:bg-amber-950/30 px-4 py-3 text-xs text-amber-900 dark:text-amber-200">
+                <WifiOff className="w-4 h-4 shrink-0 mt-0.5 text-amber-600 dark:text-amber-400" />
+                <span>
+                  برای ارسال و ثبت نهایی پرونده، برقراری اتصال اینترنت الزامی است. نگران نباشید؛ تمام اطلاعات شما به‌صورت ایمن در مرورگر ذخیره شده و پس از وصل شدن اینترنت دکمه ثبت نهایی فعال خواهد شد.
+                </span>
               </div>
             )}
 
             {/* Step Navigation Footer */}
-            <div className="mt-8 pt-5 border-t border-slate-200 dark:border-slate-800 flex items-center justify-between">
+            <div className="mt-8 pt-5 border-t border-slate-200 dark:border-slate-800 flex flex-wrap items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={handlePrevStep}
@@ -1693,144 +2684,217 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                 <span>مرحله قبل</span>
               </button>
 
-              {currentStep < 9 ? (
-                <button
-                  type="button"
-                  onClick={handleNextStep}
-                  className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
-                >
-                  <span>ذخیره و مرحله بعد</span>
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  disabled={isLoading}
-                  onClick={handleFinalSubmit}
-                  className="flex items-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-extrabold text-white hover:bg-emerald-700 cursor-pointer"
-                >
-                  <CheckCircle2 className="w-4 h-4" />
-                  <span>{isLoading ? 'در حال ثبت نهایی...' : 'تأیید و ثبت نهایی درخواست استخدام'}</span>
-                </button>
-              )}
+              <div className="flex items-center gap-2">
+                {isEditingSubmitted && currentStep < 9 && (
+                  <button
+                    type="button"
+                    disabled={isLoading || !isOnline}
+                    onClick={async () => {
+                      if (!validateCurrentStep(currentStep)) return;
+                      await handleFinalSubmit();
+                    }}
+                    className="flex items-center gap-1.5 rounded-lg bg-emerald-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-emerald-700 cursor-pointer disabled:opacity-50"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{isLoading ? 'در حال ذخیره...' : 'ذخیره سریع تغییرات'}</span>
+                  </button>
+                )}
+
+                {currentStep < 9 ? (
+                  <button
+                    type="button"
+                    onClick={handleNextStep}
+                    className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-5 py-2.5 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
+                  >
+                    <span>{isOnline ? 'ذخیره و مرحله بعد' : 'ذخیره محلی و مرحله بعد'}</span>
+                    <ChevronLeft className="w-4 h-4" />
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    disabled={isLoading || !isOnline}
+                    onClick={handleFinalSubmit}
+                    className="flex items-center gap-2 rounded-lg bg-emerald-600 px-6 py-3 text-sm font-extrabold text-white hover:bg-emerald-700 cursor-pointer disabled:opacity-50"
+                  >
+                    <CheckCircle2 className="w-4 h-4" />
+                    <span>
+                      {!isOnline
+                        ? 'در انتظار اتصال اینترنت برای ثبت نهایی'
+                        : isLoading
+                        ? 'در حال ثبت اطلاعات...'
+                        : isEditingSubmitted
+                        ? 'ذخیره تغییرات پرونده'
+                        : 'تأیید و ثبت نهایی درخواست استخدام'}
+                    </span>
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         )}
 
         {/* VIEW 3: APPLICANT TRACKING & RECEIPT */}
-        {viewMode === 'TRACKING' && activeDossier && (
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 sm:p-8 space-y-6">
-            <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 flex items-center justify-center text-emerald-600">
-                  <UserCheck className="w-6 h-6" />
-                </div>
-                <div>
-                  <h2 className="text-lg font-extrabold text-slate-900 dark:text-white">
-                    پرونده استخدامی: {activeDossier.full_name}
-                  </h2>
-                  <p className="text-xs text-slate-500 tabular-nums">
-                    کد ملی: <strong className="text-blue-600 dark:text-blue-400">{toPersianDigits(activeDossier.national_code)}</strong> · شماره موبایل: <strong className="text-slate-700 dark:text-slate-300">{toPersianDigits(activeDossier.mobile)}</strong> · تاریخ ثبت: {toPersianDigits(activeDossier.submitted_at_jalali)}
-                  </p>
-                </div>
-              </div>
+        {viewMode === 'TRACKING' && activeDossier && (() => {
+          const isTerminalStatus =
+            activeDossier.is_terminal === 1 ||
+            ['HIRED', 'REJECTED', 'APPLICANT_WITHDRAWN'].includes(activeDossier.status_code);
+          const displayStatusLabel =
+            activeDossier.status_code === 'NEW_APPLICATION'
+              ? 'در انتظار مصاحبه حضوری'
+              : activeDossier.status_title;
 
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => setShowReceiptModal(true)}
-                  className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
-                >
-                  <Printer className="w-4 h-4" />
-                  <span>دریافت رسید ثبت‌نام (PDF / چاپ)</span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setRegistrationSmsNotice(false);
-                    setViewMode('ENTRY');
-                  }}
-                  className="rounded-lg border border-slate-300 dark:border-slate-700 px-3 py-2 text-xs font-medium cursor-pointer"
-                >
-                  بازگشت به صفحه اصلی
-                </button>
-              </div>
-            </div>
-
-            {registrationSmsNotice && (
-              <div className="flex items-center gap-2.5 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-3 text-xs font-bold text-emerald-700 dark:text-emerald-300">
-                <MessageSquare className="w-4 h-4 shrink-0" />
-                <span>
-                  ثبت‌نام شما با موفقیت انجام شد و پیامک تایید ثبت‌نام به شماره موبایل{' '}
-                  <strong className="tabular-nums">{toPersianDigits(activeDossier.mobile)}</strong> ارسال گردید.
-                </span>
-              </div>
-            )}
-
-            {/* Current Workflow Status Banner */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                <span className="text-xs text-slate-500 block mb-1">وضعیت فعلی درخواست در گردش کار:</span>
-                <span className="text-sm font-extrabold text-blue-600 dark:text-blue-400">
-                  {activeDossier.status_title}
-                </span>
-              </div>
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                <span className="text-xs text-slate-500 block mb-1">وضعیت تحویل مدارک حضوری:</span>
-                <span className="text-sm font-bold text-slate-900 dark:text-white">
-                  {activeDossier.in_person_docs_status}
-                </span>
-              </div>
-              <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
-                <span className="text-xs text-slate-500 block mb-1">حقوق توافقی پیشنهادی شما:</span>
-                <span className="text-sm font-bold tabular-nums">
-                  {formatToman(activeDossier.proposed_salary_toman)} تومان
-                </span>
-              </div>
-            </div>
-
-            {/* Scheduled Interviews for this Applicant */}
-            {activeDossier.interviews && activeDossier.interviews.length > 0 && (
-              <div className="border border-blue-200 dark:border-blue-900 rounded-xl p-4 bg-blue-50/40 dark:bg-blue-950/20">
-                <h3 className="text-xs font-bold text-blue-900 dark:text-blue-300 mb-2 flex items-center gap-1.5">
-                  <Clock className="w-4 h-4" />
-                  <span>برنامه زمان‌بندی مصاحبه حضوری شما</span>
-                </h3>
-                {activeDossier.interviews.map((iv) => (
-                  <div key={iv.id} className="text-xs space-y-1">
-                    <p>
-                      عنوان جلسه: <strong>{iv.stage_title}</strong> · وضعیت: <strong>{iv.status}</strong>
-                    </p>
-                    <p className="tabular-nums">
-                      زمان برگزاری: <strong>{toPersianDigits(iv.interview_date_jalali)} ساعت {toPersianDigits(iv.interview_time)}</strong> · مکان: {iv.location}
+          return (
+            <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-xl p-6 sm:p-8 space-y-6">
+              <div className="flex flex-wrap items-center justify-between gap-4 border-b border-slate-200 dark:border-slate-800 pb-5">
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-xl bg-emerald-100 dark:bg-emerald-950/60 flex items-center justify-center text-emerald-600">
+                    <UserCheck className="w-6 h-6" />
+                  </div>
+                  <div>
+                    <h2 className="text-lg font-extrabold text-slate-900 dark:text-white">
+                      پرونده استخدامی: {activeDossier.full_name}
+                    </h2>
+                    <p className="text-xs text-slate-500 tabular-nums">
+                      کد ملی: <strong className="text-blue-600 dark:text-blue-400">{toPersianDigits(activeDossier.national_code)}</strong> · شماره موبایل: <strong className="text-slate-700 dark:text-slate-300">{toPersianDigits(activeDossier.mobile)}</strong> · تاریخ ثبت: {toPersianDigits(activeDossier.submitted_at_jalali)}
                     </p>
                   </div>
-                ))}
-              </div>
-            )}
+                </div>
 
-            {/* Applicant-Visible Timeline */}
-            <div>
-              <h3 className="text-sm font-bold mb-3">تاریخچه پیگیری درخواست</h3>
-              <div className="space-y-2.5">
-                {activeDossier.timeline
-                  .filter((ev) => ev.event_type !== 'INTERNAL_NOTE')
-                  .map((ev) => (
-                    <div
-                      key={ev.id}
-                      className="flex items-start justify-between gap-4 border border-slate-200 dark:border-slate-800 rounded-lg p-3 text-xs"
+                <div className="flex flex-wrap items-center gap-2">
+                  {!isTerminalStatus && (
+                    <button
+                      type="button"
+                      onClick={handleStartEditSubmitted}
+                      className="flex items-center gap-1.5 rounded-lg border border-blue-600 bg-blue-50/70 dark:bg-blue-950/40 px-4 py-2 text-xs font-bold text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-950/70 cursor-pointer"
                     >
-                      <div>
-                        <span className="font-bold text-slate-900 dark:text-white">{ev.title}</span>
-                        <p className="text-slate-600 dark:text-slate-400 mt-0.5">{ev.description}</p>
-                      </div>
-                      <span className="text-slate-400 tabular-nums shrink-0">{toPersianDigits(ev.event_date_jalali)}</span>
+                      <Edit3 className="w-4 h-4" />
+                      <span>ویرایش اطلاعات ثبت‌نامی</span>
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setShowReceiptModal(true)}
+                    className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-4 py-2 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
+                  >
+                    <Printer className="w-4 h-4" />
+                    <span>دریافت رسید ثبت‌نام (PDF / چاپ)</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleApplicantLogout}
+                    className="flex items-center gap-1.5 rounded-lg border border-rose-200 dark:border-rose-800 px-3 py-2 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" />
+                    <span>خروج از حساب کاربری</span>
+                  </button>
+                </div>
+              </div>
+
+              {registrationSmsNotice && (
+                <div className="flex items-center gap-2.5 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-3 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                  <MessageSquare className="w-4 h-4 shrink-0" />
+                  <span>
+                    ثبت‌نام شما با موفقیت انجام شد و پیامک تایید ثبت‌نام به شماره موبایل{' '}
+                    <strong className="tabular-nums">{toPersianDigits(activeDossier.mobile)}</strong> ارسال گردید.
+                  </span>
+                </div>
+              )}
+
+              {editSavedNotice && (
+                <div className="flex items-center gap-2.5 rounded-lg border border-emerald-200 dark:border-emerald-800 bg-emerald-50 dark:bg-emerald-950/40 px-4 py-3 text-xs font-bold text-emerald-700 dark:text-emerald-300">
+                  <CheckCircle2 className="w-4 h-4 shrink-0" />
+                  <span>تغییرات اطلاعات ثبت‌نامی پرونده شما با موفقیت ذخیره و به‌روزرسانی گردید.</span>
+                </div>
+              )}
+
+              {/* Current Workflow Status Banner */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
+                  <span className="text-xs text-slate-500 block mb-1">وضعیت فعلی درخواست در گردش کار:</span>
+                  <span className="text-sm font-extrabold text-blue-600 dark:text-blue-400">
+                    {displayStatusLabel}
+                  </span>
+                </div>
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
+                  <span className="text-xs text-slate-500 block mb-1">مرحله بعد:</span>
+                  <span className="text-sm font-extrabold text-slate-900 dark:text-white block">
+                    مصاحبه حضوری
+                  </span>
+                  {activeDossier.in_person_docs_status &&
+                    activeDossier.in_person_docs_status !== 'دریافت نشده' && (
+                      <span className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5 block">
+                        مدارک حضوری: {activeDossier.in_person_docs_status}
+                      </span>
+                    )}
+                </div>
+                <div className="p-4 rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40">
+                  {activeDossier.proposed_salary_toman > 0 ? (
+                    <>
+                      <span className="text-xs text-slate-500 block mb-1">حقوق توافقی پیشنهادی شما:</span>
+                      <span className="text-sm font-bold tabular-nums">
+                        {formatToman(activeDossier.proposed_salary_toman)} تومان
+                      </span>
+                    </>
+                  ) : (
+                    <>
+                      <span className="text-xs text-slate-500 block mb-1">شماره پیگیری (کد ملی):</span>
+                      <span className="text-sm font-bold tabular-nums">
+                        {toPersianDigits(activeDossier.national_code)}
+                      </span>
+                    </>
+                  )}
+                </div>
+              </div>
+
+              {isTerminalStatus && (
+                <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/40 px-4 py-2.5 text-xs text-slate-600 dark:text-slate-400">
+                  پرونده شما به وضعیت نهایی ({activeDossier.status_title}) رسیده است و امکان ویرایش اطلاعات ثبت‌نامی بسته شده است.
+                </div>
+              )}
+
+              {/* Scheduled Interviews for this Applicant */}
+              {activeDossier.interviews && activeDossier.interviews.length > 0 && (
+                <div className="border border-blue-200 dark:border-blue-900 rounded-xl p-4 bg-blue-50/40 dark:bg-blue-950/20">
+                  <h3 className="text-xs font-bold text-blue-900 dark:text-blue-300 mb-2 flex items-center gap-1.5">
+                    <Clock className="w-4 h-4" />
+                    <span>برنامه زمان‌بندی مصاحبه حضوری شما</span>
+                  </h3>
+                  {activeDossier.interviews.map((iv) => (
+                    <div key={iv.id} className="text-xs space-y-1">
+                      <p>
+                        عنوان جلسه: <strong>{iv.stage_title}</strong> · وضعیت: <strong>{iv.status}</strong>
+                      </p>
+                      <p className="tabular-nums">
+                        زمان برگزاری: <strong>{toPersianDigits(iv.interview_date_jalali)} ساعت {toPersianDigits(iv.interview_time)}</strong> · مکان: {iv.location}
+                      </p>
                     </div>
                   ))}
+                </div>
+              )}
+
+              {/* Applicant-Visible Timeline */}
+              <div>
+                <h3 className="text-sm font-bold mb-3">تاریخچه پیگیری درخواست</h3>
+                <div className="space-y-2.5">
+                  {activeDossier.timeline
+                    .filter((ev) => ev.event_type !== 'INTERNAL_NOTE')
+                    .map((ev) => (
+                      <div
+                        key={ev.id}
+                        className="flex items-start justify-between gap-4 border border-slate-200 dark:border-slate-800 rounded-lg p-3 text-xs"
+                      >
+                        <div>
+                          <span className="font-bold text-slate-900 dark:text-white">{ev.title}</span>
+                          <p className="text-slate-600 dark:text-slate-400 mt-0.5">{ev.description}</p>
+                        </div>
+                        <span className="text-slate-400 tabular-nums shrink-0">{toPersianDigits(ev.event_date_jalali)}</span>
+                      </div>
+                    ))}
+                </div>
               </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
       </main>
 
       <PrintReportModal
@@ -1840,7 +2904,151 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
         title="رسید رسمی ثبت درخواست استخدام شرکت دستوا"
         singleDossier={activeDossier}
         canViewEvaluations={false}
+        orgLogoDataUrl={config.org_logo_data_url || ''}
       />
+
+      {/* Applicant Profile Modal */}
+      {showProfileModal && viewMode !== 'ENTRY' && (() => {
+        const isSubmitted = activeDossier?.is_submitted === 1;
+        const isTerminal =
+          Boolean(activeDossier) &&
+          (activeDossier!.is_terminal === 1 ||
+            ['HIRED', 'REJECTED', 'APPLICANT_WITHDRAWN'].includes(activeDossier!.status_code));
+        const profileName =
+          `${firstName} ${lastName}`.trim() || activeDossier?.full_name || 'متقاضی استخدام';
+        const profileStatus = isSubmitted
+          ? activeDossier!.status_code === 'NEW_APPLICATION'
+            ? 'در انتظار مصاحبه حضوری'
+            : activeDossier!.status_title
+          : `ثبت‌نام ناتمام (مرحله ${toPersianDigits(currentActiveIndex + 1)} از ${toPersianDigits(activeSteps.length)})`;
+        const primaryEdu = educationList[0];
+
+        return (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+            <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl overflow-hidden">
+              <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-800/50">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-blue-600 text-white flex items-center justify-center shrink-0">
+                    <User className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                      پروفایل کاربری متقاضی
+                    </h3>
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                      {profileName}
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowProfileModal(false)}
+                  aria-label="بستن پروفایل"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 dark:hover:text-slate-200 hover:bg-slate-200/60 dark:hover:bg-slate-700 cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="p-6 space-y-4 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">نام و نام خانوادگی</span>
+                    <span className="font-bold text-slate-900 dark:text-white">{profileName}</span>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">وضعیت پرونده</span>
+                    <span className="font-extrabold text-blue-600 dark:text-blue-400">{profileStatus}</span>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">کد ملی</span>
+                    <span className="font-bold text-slate-900 dark:text-white tabular-nums">
+                      {toPersianDigits(nationalCode || activeDossier?.national_code || '—')}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">شماره موبایل</span>
+                    <span className="font-bold text-slate-900 dark:text-white tabular-nums">
+                      {toPersianDigits(mobile || activeDossier?.mobile || '—')}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">تحصیلات</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {primaryEdu?.major
+                        ? `${primaryEdu.degree_level} ${primaryEdu.major}`
+                        : 'ثبت نشده'}
+                    </span>
+                  </div>
+                  <div className="rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-50/60 dark:bg-slate-800/40 p-3">
+                    <span className="text-slate-500 dark:text-slate-400 block mb-1">محل سکونت</span>
+                    <span className="font-semibold text-slate-800 dark:text-slate-200">
+                      {city ? `${city}${district ? ` - ${district}` : ''}` : 'ثبت نشده'}
+                    </span>
+                  </div>
+                </div>
+
+                {isSubmitted && activeDossier?.submitted_at_jalali && (
+                  <div className="flex items-center justify-between rounded-lg border border-slate-200 dark:border-slate-800 px-3.5 py-2.5 text-slate-600 dark:text-slate-300">
+                    <span>تاریخ ثبت نهایی درخواست:</span>
+                    <strong className="tabular-nums text-slate-900 dark:text-white">
+                      {toPersianDigits(activeDossier.submitted_at_jalali)}
+                    </strong>
+                  </div>
+                )}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 px-6 py-4 border-t border-slate-200 dark:border-slate-800 bg-slate-50/70 dark:bg-slate-800/40">
+                <div className="flex flex-wrap items-center gap-2">
+                  {isSubmitted && viewMode === 'FORM' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowProfileModal(false);
+                        handleCancelEditSubmitted();
+                      }}
+                      className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-xs font-bold text-slate-700 dark:text-slate-200 hover:bg-slate-100 cursor-pointer"
+                    >
+                      مشاهده وضعیت و رسید
+                    </button>
+                  )}
+                  {isSubmitted && !isTerminal && viewMode === 'TRACKING' && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setShowProfileModal(false);
+                        handleStartEditSubmitted();
+                      }}
+                      className="flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
+                    >
+                      <Edit3 className="w-3.5 h-3.5" />
+                      <span>ویرایش اطلاعات ثبت‌نامی</span>
+                    </button>
+                  )}
+                  {!isSubmitted && (
+                    <button
+                      type="button"
+                      onClick={() => setShowProfileModal(false)}
+                      className="rounded-lg bg-blue-600 px-3.5 py-2 text-xs font-bold text-white hover:bg-blue-700 cursor-pointer"
+                    >
+                      ادامه تکمیل ثبت‌نام
+                    </button>
+                  )}
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleApplicantLogout}
+                  className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>خروج از حساب کاربری</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 };

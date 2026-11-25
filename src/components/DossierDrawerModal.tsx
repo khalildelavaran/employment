@@ -11,6 +11,7 @@ import {
   Calendar,
   UserCheck,
   FileText,
+  Trash2,
 } from 'lucide-react';
 import {
   APPLICATION_STATUS_LIST,
@@ -25,6 +26,7 @@ interface DossierDrawerModalProps {
   applicationId: number | null;
   onClose: () => void;
   onUpdated: () => void;
+  onDeleted?: (applicationId: number) => void;
   onPrintSingle: (dossier: ApplicantFullDossier) => void;
   onScheduleInterviewForApplicant?: (applicationId: number, fullName: string) => void;
 }
@@ -33,6 +35,7 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
   applicationId,
   onClose,
   onUpdated,
+  onDeleted,
   onPrintSingle,
   onScheduleInterviewForApplicant,
 }) => {
@@ -60,6 +63,9 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
   const [evalComment, setEvalComment] = useState('');
   const [scoreValues, setScoreValues] = useState<Record<number, { score: number; note: string }>>({});
   const [actionToast, setActionToast] = useState('');
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [isDeletingDossier, setIsDeletingDossier] = useState(false);
+  const [deleteError, setDeleteError] = useState('');
 
   const headers = {
     'Content-Type': 'application/json',
@@ -96,6 +102,8 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
 
   useEffect(() => {
     if (applicationId) {
+      setConfirmDeleteOpen(false);
+      setDeleteError('');
       fetchDossierData(applicationId);
     }
   }, [applicationId]);
@@ -193,6 +201,33 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
     }
   };
 
+  const handleDeleteDossier = async () => {
+    if (!dossier || isDeletingDossier) return;
+    setIsDeletingDossier(true);
+    setDeleteError('');
+    try {
+      const res = await fetch(`/api/admin/applicants/${dossier.application_id}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setDeleteError(data.error || 'خطا در حذف پرونده متقاضی.');
+        return;
+      }
+      setConfirmDeleteOpen(false);
+      if (onDeleted) {
+        onDeleted(dossier.application_id);
+      } else {
+        onUpdated();
+        onClose();
+      }
+    } catch {
+      setDeleteError('خطا در برقراری ارتباط با سرور برای حذف پرونده.');
+    } finally {
+      setIsDeletingDossier(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/70 p-4 overflow-y-auto">
       <div className="relative w-full max-w-6xl rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl my-6 overflow-hidden">
@@ -225,7 +260,7 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
             </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {onScheduleInterviewForApplicant && (
               <button
                 type="button"
@@ -246,6 +281,17 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
             </button>
             <button
               type="button"
+              onClick={() => {
+                setDeleteError('');
+                setConfirmDeleteOpen((prev) => !prev);
+              }}
+              className="flex items-center gap-1.5 rounded-lg border border-rose-300 dark:border-rose-800 bg-rose-50/70 dark:bg-rose-950/30 px-3 py-2 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-100 dark:hover:bg-rose-900/50 cursor-pointer whitespace-nowrap"
+            >
+              <Trash2 className="w-4 h-4" />
+              <span>حذف پرونده</span>
+            </button>
+            <button
+              type="button"
               onClick={onClose}
               className="rounded-lg border border-slate-300 dark:border-slate-700 p-2 text-slate-600 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
             >
@@ -253,6 +299,37 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
             </button>
           </div>
         </div>
+
+        {confirmDeleteOpen && (
+          <div className="border-b border-rose-200 dark:border-rose-900 bg-rose-50 dark:bg-rose-950/40 px-6 py-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
+            <div className="flex items-center gap-2 text-rose-800 dark:text-rose-200 font-bold">
+              <AlertTriangle className="w-4 h-4 text-rose-600 shrink-0" />
+              <span>
+                آیا از حذف دائمی پرونده «{dossier.full_name}» و تمامی سوابق، مصاحبه‌ها و ارزیابی‌های مرتبط اطمینان دارید؟
+              </span>
+              {deleteError && <span className="text-rose-700 underline">({deleteError})</span>}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={isDeletingDossier}
+                onClick={() => setConfirmDeleteOpen(false)}
+                className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-700 dark:text-slate-300 cursor-pointer"
+              >
+                انصراف
+              </button>
+              <button
+                type="button"
+                disabled={isDeletingDossier}
+                onClick={handleDeleteDossier}
+                className="flex items-center gap-1 rounded-lg bg-rose-600 px-3.5 py-1.5 font-bold text-white hover:bg-rose-700 cursor-pointer disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeletingDossier ? 'در حال حذف...' : 'تأیید و حذف قطعی'}</span>
+              </button>
+            </div>
+          </div>
+        )}
 
         {actionToast && (
           <div className="bg-emerald-600 text-white px-6 py-2.5 text-xs font-bold flex items-center gap-2">

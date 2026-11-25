@@ -17,6 +17,8 @@ import {
   ArrowUpDown,
   Clock,
   FileSpreadsheet,
+  Trash2,
+  AlertTriangle,
 } from 'lucide-react';
 import {
   APPLICATION_STATUS_LIST,
@@ -365,6 +367,13 @@ export const ApplicantsTableView: React.FC<ApplicantsTableViewProps> = ({
   const [bulkReason, setBulkReason] = useState<string>('');
   const [isBulkUpdating, setIsBulkUpdating] = useState<boolean>(false);
   const [bulkToast, setBulkToast] = useState<string>('');
+  const [deleteConfirm, setDeleteConfirm] = useState<
+    | { mode: 'single'; item: ApplicantSummaryRow }
+    | { mode: 'bulk'; ids: number[]; names: string[] }
+    | null
+  >(null);
+  const [isDeleting, setIsDeleting] = useState<boolean>(false);
+  const [deleteError, setDeleteError] = useState<string>('');
 
   const [visibleCols, setVisibleCols] = useState({
     full_name: true,
@@ -433,6 +442,52 @@ export const ApplicantsTableView: React.FC<ApplicantsTableViewProps> = ({
       }
     } finally {
       setIsBulkUpdating(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    if (!deleteConfirm || isDeleting) return;
+    setIsDeleting(true);
+    setDeleteError('');
+    try {
+      if (deleteConfirm.mode === 'single') {
+        const targetId = deleteConfirm.item.application_id;
+        const res = await fetch(`/api/admin/applicants/${targetId}`, {
+          method: 'DELETE',
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setDeleteError(data.error || 'خطا در حذف پرونده متقاضی.');
+          return;
+        }
+        setSelectedIds((prev) => prev.filter((id) => id !== targetId));
+        setBulkToast(`پرونده متقاضی «${deleteConfirm.item.full_name}» با موفقیت حذف شد.`);
+        setTimeout(() => setBulkToast(''), 4000);
+        setDeleteConfirm(null);
+        if (onBulkStatusUpdated) onBulkStatusUpdated();
+      } else {
+        const res = await fetch('/api/admin/applicants/bulk-delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ application_ids: deleteConfirm.ids }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setDeleteError(data.error || 'خطا در حذف گروهی متقاضیان.');
+          return;
+        }
+        setSelectedIds([]);
+        setBulkToast(
+          `${toPersianDigits(data.deleted_count)} پرونده متقاضی انتخاب‌شده با موفقیت حذف گردید.`
+        );
+        setTimeout(() => setBulkToast(''), 4000);
+        setDeleteConfirm(null);
+        if (onBulkStatusUpdated) onBulkStatusUpdated();
+      }
+    } catch {
+      setDeleteError('خطا در برقراری ارتباط با سرور برای حذف پرونده.');
+    } finally {
+      setIsDeleting(false);
     }
   };
 
@@ -620,6 +675,26 @@ const handleExportToExcel = async () => {
               >
                 <XCircle className="w-3.5 h-3.5" />
                 <span>رد درخواست (Reject)</span>
+              </button>
+
+              <button
+                type="button"
+                disabled={isBulkUpdating || isDeleting}
+                onClick={() => {
+                  const selectedNames = items
+                    .filter((i) => selectedIds.includes(i.application_id))
+                    .map((i) => i.full_name);
+                  setDeleteError('');
+                  setDeleteConfirm({
+                    mode: 'bulk',
+                    ids: [...selectedIds],
+                    names: selectedNames,
+                  });
+                }}
+                className="flex items-center gap-1.5 rounded-lg border border-rose-600 bg-white dark:bg-slate-900 px-3 py-1.5 text-xs font-bold text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 cursor-pointer disabled:opacity-50"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>حذف انتخاب‌شده‌ها ({toPersianDigits(selectedIds.length)})</span>
               </button>
 
               <button
@@ -1054,14 +1129,28 @@ const handleExportToExcel = async () => {
                     </td>
                   )}
                   <td className="py-2.5 px-3 text-left whitespace-nowrap">
-                    <button
-                      type="button"
-                      onClick={() => onOpenDossier(row.application_id)}
-                      className="inline-flex items-center gap-1 rounded-lg bg-slate-900 dark:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 cursor-pointer"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                      <span>پرونده کامل</span>
-                    </button>
+                    <div className="inline-flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => onOpenDossier(row.application_id)}
+                        className="inline-flex items-center gap-1 rounded-lg bg-slate-900 dark:bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-slate-800 dark:hover:bg-blue-700 cursor-pointer"
+                      >
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>پرونده کامل</span>
+                      </button>
+                      <button
+                        type="button"
+                        title="حذف کامل متقاضی"
+                        aria-label={`حذف ${row.full_name}`}
+                        onClick={() => {
+                          setDeleteError('');
+                          setDeleteConfirm({ mode: 'single', item: row });
+                        }}
+                        className="inline-flex items-center justify-center rounded-lg border border-rose-200 dark:border-rose-900 p-1.5 text-rose-600 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/50 cursor-pointer"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}
@@ -1076,6 +1165,87 @@ const handleExportToExcel = async () => {
           </table>
         </div>
       </div>
+
+      {/* Delete Confirmation Modal */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/70 p-4">
+          <div className="w-full max-w-md rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl p-6 space-y-4">
+            <div className="flex items-start gap-3">
+              <div className="w-10 h-10 rounded-xl bg-rose-100 dark:bg-rose-950/60 text-rose-600 flex items-center justify-center shrink-0">
+                <AlertTriangle className="w-5 h-5" />
+              </div>
+              <div className="space-y-1">
+                <h3 className="text-sm font-extrabold text-slate-900 dark:text-white">
+                  {deleteConfirm.mode === 'single'
+                    ? 'تأیید حذف پرونده متقاضی'
+                    : `تأیید حذف گروهی ${toPersianDigits(deleteConfirm.ids.length)} متقاضی`}
+                </h3>
+                <p className="text-xs text-slate-600 dark:text-slate-300 leading-relaxed">
+                  {deleteConfirm.mode === 'single' ? (
+                    <>
+                      آیا از حذف کامل پرونده{' '}
+                      <strong className="text-slate-900 dark:text-white">
+                        {deleteConfirm.item.full_name}
+                      </strong>{' '}
+                      (کد ملی{' '}
+                      <span className="tabular-nums font-bold">
+                        {toPersianDigits(deleteConfirm.item.national_code)}
+                      </span>
+                      ) اطمینان دارید؟ تمام سوابق، مصاحبه‌ها و ارزیابی‌های این متقاضی برای همیشه حذف خواهند شد.
+                    </>
+                  ) : (
+                    <>
+                      آیا از حذف کامل{' '}
+                      <strong className="text-rose-600 tabular-nums">
+                        {toPersianDigits(deleteConfirm.ids.length)} پرونده انتخاب‌شده
+                      </strong>{' '}
+                      اطمینان دارید؟ این عملیات غیرقابل بازگشت است و تمام اطلاعات، مصاحبه‌ها و ارزیابی‌های مرتبط حذف می‌شوند.
+                    </>
+                  )}
+                </p>
+              </div>
+            </div>
+
+            {deleteConfirm.mode === 'bulk' && deleteConfirm.names.length > 0 && (
+              <div className="rounded-lg bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 p-3 text-xs text-slate-700 dark:text-slate-300 max-h-28 overflow-y-auto">
+                <div className="font-bold mb-1">متقاضیان انتخاب‌شده:</div>
+                <div>
+                  {deleteConfirm.names.slice(0, 8).join('، ')}
+                  {deleteConfirm.names.length > 8
+                    ? ` و ${toPersianDigits(deleteConfirm.names.length - 8)} نفر دیگر`
+                    : ''}
+                </div>
+              </div>
+            )}
+
+            {deleteError && (
+              <div className="rounded-lg bg-rose-50 dark:bg-rose-950/50 border border-rose-200 dark:border-rose-800 p-2.5 text-xs font-bold text-rose-700 dark:text-rose-300">
+                {deleteError}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={() => setDeleteConfirm(null)}
+                className="rounded-lg border border-slate-300 dark:border-slate-700 px-4 py-2 text-xs font-semibold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-slate-800 cursor-pointer"
+              >
+                انصراف
+              </button>
+              <button
+                type="button"
+                disabled={isDeleting}
+                onClick={handleConfirmDelete}
+                className="flex items-center gap-1.5 rounded-lg bg-rose-600 px-4 py-2 text-xs font-bold text-white hover:bg-rose-700 cursor-pointer disabled:opacity-60"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>{isDeleting ? 'در حال حذف...' : 'تأیید و حذف قطعی'}</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
@@ -1139,7 +1309,7 @@ export const WorkflowPipelineView: React.FC<{
                     <p className="text-xs text-slate-400 py-4 text-center">بدون متقاضی در این مرحله</p>
                   )}
                 </div>
-              </div>f
+              </div>
             </div>
           );
         })}

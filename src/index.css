@@ -182,21 +182,71 @@
     color: var(--ta-black, var(--theme-text-primary)) !important;
     border-color: var(--ta-stroke, var(--theme-border)) !important;
   }
+
+  /* 9. Isolated Print Portal (hidden on screen) & White A4 Preview Isolation */
+  #employment-print-portal {
+    display: none !important;
+  }
+
+  .print-paper-surface {
+    background-color: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  .print-paper-surface .print-card-subtle {
+    background-color: #f8fafc !important;
+    border-color: #e2e8f0 !important;
+  }
+
+  .print-paper-surface .print-table-head {
+    background-color: #f1f5f9 !important;
+    color: #0f172a !important;
+  }
+
+  .print-paper-surface .print-text-primary {
+    color: #0f172a !important;
+  }
+
+  .print-paper-surface .print-text-secondary {
+    color: #334155 !important;
+  }
+
+  .print-paper-surface .print-text-muted {
+    color: #64748b !important;
+  }
 }
 
 @media print {
   @page {
     size: A4 portrait;
-    margin: 12mm;
+    margin: 10mm;
   }
 
+  html,
   body {
     background: #ffffff !important;
     color: #0f172a !important;
     direction: rtl !important;
-    font-family: 'Vazirmatn', sans-serif !important;
+    font-family: 'Vazirmatn', system-ui, sans-serif !important;
+    margin: 0 !important;
+    padding: 0 !important;
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
+  }
+
+  /* Critical fix: hide the main React app behind the modal so only the dedicated print document prints once */
+  body.print-portal-active #root {
+    display: none !important;
+  }
+
+  body.print-portal-active #employment-print-portal {
+    display: block !important;
+    position: static !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    color: #0f172a !important;
   }
 
   .no-print {
@@ -216,4 +266,19 @@
     page-break-inside: avoid;
     break-inside: avoid;
   }
+
+  #employment-print-portal table {
+    border-collapse: collapse !important;
+    width: 100% !important;
+  }
+
+  #employment-print-portal thead {
+    display: table-header-group;
+  }
+
+  #employment-print-portal tr {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
 }
+
