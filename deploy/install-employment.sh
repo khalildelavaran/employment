@@ -76,7 +76,7 @@ Examples:
   sudo ./install-employment.sh
 
   # Install with custom domain and automatic Let's Encrypt HTTPS:
-  sudo ./install-employment.sh --domain employment.example.com --enable-ssl --email ops@example.com
+  sudo ./install-employment.sh --domain profile.dastva.co --enable-ssl --email ops@dastva.co
 EOF
 }
 
@@ -230,7 +230,7 @@ stage_preflight() {
   # Validate SSL inputs if requested
   if [[ "${ENABLE_SSL}" == "true" ]]; then
     if [[ -z "${DOMAIN}" || "${DOMAIN}" == "_" ]]; then
-      log_error "--enable-ssl requires a valid public --domain (e.g. --domain employment.example.com)."
+      log_error "--enable-ssl requires a valid public --domain (e.g. --domain profile.dastva.co)."
       exit 1
     fi
     if [[ -z "${SSL_EMAIL}" ]]; then

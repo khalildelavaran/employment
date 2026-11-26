@@ -115,7 +115,7 @@ employment/
 | `HOST` | بله | `127.0.0.1` | محدودسازی گوش‌دادن Express فقط به Loopback پشت Nginx |
 | `PORT` | بله | `3000` | پورت داخلی Express (قابل تنظیم در اسکریپت نصب) |
 | `DB_PATH` | بله | `/var/lib/employment/data/dasteva_d1.sqlite` | مسیر مستقل دیتابیس خارج از مخزن Git |
-| `APP_URL` | توصیه‌شده | `https://employment.example.com` | نشانی عمومی سامانه |
+| `APP_URL` | توصیه‌شده | `https://profile.dastva.co` | نشانی عمومی سامانه |
 | `FARAZSMS_BASE_URL` | اختیاری | `https://api.iranpayamak.com` | آدرس پایه وب‌سرویس فراز اس‌ام‌اس |
 | `FARAZSMS_API_KEY` | اختیاری (برای پیامک) | کلید واقعی پنل فراز اس‌ام‌اس | فقط سمت سرور خوانده می‌شود (`Api-Key` header) |
 | `FARAZSMS_KEY_TITLE` | اختیاری | `emloyment` | عنوان کلید نمایش‌داده‌شده در تب اتصال پنل |
@@ -203,9 +203,9 @@ sudo ./install-employment.sh
 *(پیش‌شرط: رکورد DNS نوع `A` دامنه به IP سرور اشاره کرده باشد.)*
 ```bash
 sudo ./install-employment.sh \
-  --domain employment.example.com \
+  --domain profile.dastva.co \
   --enable-ssl \
-  --email ops@example.com
+  --email ops@dastva.co
 ```
 
 - **حالت ج — نصب با مسیرها و پورت سفارشی:**
@@ -358,5 +358,5 @@ sudo employment-update --rollback /var/backups/employment/backup-20261122-140500
 | خطای `502 Bad Gateway` در Nginx | سرویس `employment` خاموش است یا روی پورت دیگری گوش می‌دهد | وضعیت سرویس را بررسی کنید (`sudo systemctl status employment`)، پورت `PORT` در `/etc/employment/employment.env` را با `proxy_pass` در `/etc/nginx/sites-available/employment` تطبیق دهید و لاگ را بخوانید (`sudo journalctl -u employment -n 50`) |
 | خطای `SQLITE_READONLY` یا `unable to open database file` | تغییر مالکیت یا مجوز پوشه `/var/lib/employment/data` | اصلاح مجوزها: `sudo chown -R employment:employment /var/lib/employment/data && sudo chmod 750 /var/lib/employment/data && sudo chmod 640 /var/lib/employment/data/dasteva_d1.sqlite && sudo systemctl restart employment` |
 | خطای `413 Request Entity Too Large` هنگام آپلود رزومه/عکس | حجم فایل ارسالی بیش از سقف Nginx است | در `/etc/nginx/sites-available/employment` مقدار `client_max_body_size 12m;` را بررسی و در صورت تغییر، `sudo nginx -t && sudo systemctl reload nginx` اجرا کنید |
-| خطا در صدور گواهی SSL توسط Certbot | رکورد DNS دامنه هنوز به سرور اشاره نکرده یا پورت 80 بسته است | با `dig +short employment.example.com` آدرس IP را تأیید و با `sudo ufw status` باز بودن پورت‌های 80 و 443 را بررسی کنید، سپس دستور Certbot را دوباره اجرا نمایید |
+| خطا در صدور گواهی SSL توسط Certbot | رکورد DNS دامنه هنوز به سرور اشاره نکرده یا پورت 80 بسته است | با `dig +short profile.dastva.co` آدرس IP را تأیید و با `sudo ufw status` باز بودن پورت‌های 80 و 443 را بررسی کنید، سپس دستور Certbot را دوباره اجرا نمایید |
 | پیامک‌ها ارسال نمی‌شوند یا خطای احراز هویت فراز اس‌ام‌اس رخ می‌دهد | `FARAZSMS_API_KEY` در `/etc/employment/employment.env` خالی یا نامعتبر است | کلید معتبر را در `/etc/employment/employment.env` قرار دهید، `sudo systemctl restart employment` بزنید و از تب «تست ارسال پیامک» اتصال زنده را بررسی کنید |

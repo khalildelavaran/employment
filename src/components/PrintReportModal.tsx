@@ -510,8 +510,8 @@ export const PrintReportModal: React.FC<PrintReportModalProps> = ({
               <footer className="mt-5 pt-3 border-t border-slate-300 flex items-center justify-between text-[10px] text-slate-500 print-text-muted print-avoid-break">
                 <span>
                   {isReceipt
-                    ? 'پیگیری وضعیت پرونده از طریق کد ملی و شماره موبایل در درگاه استخدام شرکت دستوا امکان‌پذیر است.'
-                    : 'سامانه جامع جذب و استخدام شرکت دستوا — سند محرمانه واحد منابع انسانی'}
+                    ? 'پیگیری وضعیت پرونده با کد ملی و شماره موبایل از طریق درگاه استخدام دستوا (profile.dastva.co) امکان‌پذیر است.'
+                    : 'سامانه جامع جذب و استخدام شرکت دستوا (profile.dastva.co) — سند محرمانه واحد منابع انسانی'}
                 </span>
                 <span className="font-semibold text-slate-700">
                   {isReceipt ? 'تأییدیه سیستمی (بدون نیاز به مهر)' : 'محل امضا و تأیید واحد منابع انسانی'}

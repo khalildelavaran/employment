@@ -39,7 +39,7 @@ export const DEFAULT_SMS_TEMPLATES: Record<SmsEventKey, SmsTemplateConfig> = {
     pattern_code: '',
     pattern_var_map: { name: 'name', national_code: 'national_code' },
     text_template:
-      '%name% عزیز، ثبت‌نام شما در سامانه استخدام شرکت دستوا با موفقیت انجام شد. پیگیری وضعیت پرونده با کد ملی (%national_code%) و شماره موبایل از طریق درگاه سامانه امکان‌پذیر است.',
+      '%name% عزیز، ثبت‌نام شما در سامانه استخدام شرکت دستوا با موفقیت انجام شد. پیگیری وضعیت پرونده با کد ملی (%national_code%) و شماره موبایل از طریق درگاه profile.dastva.co امکان‌پذیر است.',
   },
   STATUS_AND_INTERVIEW: {
     enabled: true,
