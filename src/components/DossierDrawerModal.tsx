@@ -12,6 +12,8 @@ import {
   UserCheck,
   FileText,
   Trash2,
+  Edit3,
+  Save,
 } from 'lucide-react';
 import {
   APPLICATION_STATUS_LIST,
@@ -20,7 +22,13 @@ import {
   IN_PERSON_DOCS_STATUSES,
   InPersonDocsStatus,
 } from '../types/recruitment.ts';
-import { formatToman, toPersianDigits } from '../utils/validation.ts';
+import {
+  formatToman,
+  toEnglishDigits,
+  toPersianDigits,
+  validateIranianMobile,
+  validateIranianNationalCode,
+} from '../utils/validation.ts';
 
 interface DossierDrawerModalProps {
   applicationId: number | null;
@@ -67,6 +75,13 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
   const [isDeletingDossier, setIsDeletingDossier] = useState(false);
   const [deleteError, setDeleteError] = useState('');
 
+  // Admin Identity / Contact Edit State (National Code & Mobile)
+  const [isEditingIdentity, setIsEditingIdentity] = useState(false);
+  const [editNationalCode, setEditNationalCode] = useState('');
+  const [editMobile, setEditMobile] = useState('');
+  const [identityEditError, setIdentityEditError] = useState('');
+  const [isSavingIdentity, setIsSavingIdentity] = useState(false);
+
   const headers = {
     'Content-Type': 'application/json',
   };
@@ -82,6 +97,10 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
     if (dosData.dossier) {
       const d: ApplicantFullDossier = dosData.dossier;
       setDossier(d);
+      setEditNationalCode(d.national_code || '');
+      setEditMobile(d.mobile || '');
+      setIsEditingIdentity(false);
+      setIdentityEditError('');
       setSelectedStatus(d.status_code);
       setFinalDecisionNote(d.final_decision_note || '');
       setInPersonDocsStatus(d.in_person_docs_status || 'دریافت نشده');
@@ -228,6 +247,56 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
     }
   };
 
+  const handleSaveIdentityContact = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!dossier || isSavingIdentity) return;
+    setIdentityEditError('');
+
+    const cleanNat = toEnglishDigits(editNationalCode).trim();
+    const cleanMob = toEnglishDigits(editMobile).trim();
+
+    const natCheck = validateIranianNationalCode(cleanNat);
+    if (!natCheck.valid) {
+      setIdentityEditError(natCheck.message || 'کد ملی واردشده معتبر نیست.');
+      return;
+    }
+
+    const mobCheck = validateIranianMobile(cleanMob);
+    if (!mobCheck.valid) {
+      setIdentityEditError(mobCheck.message || 'شماره موبایل واردشده معتبر نیست.');
+      return;
+    }
+
+    setIsSavingIdentity(true);
+    try {
+      const res = await fetch(`/api/admin/applicants/${dossier.application_id}/identity-contact`, {
+        method: 'PATCH',
+        headers,
+        body: JSON.stringify({
+          national_code: cleanNat,
+          mobile: cleanMob,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setIdentityEditError(data.error || 'خطا در ذخیره کد ملی و شماره موبایل.');
+        return;
+      }
+      if (data.dossier) {
+        setDossier(data.dossier);
+        setEditNationalCode(data.dossier.national_code || cleanNat);
+        setEditMobile(data.dossier.mobile || cleanMob);
+      }
+      setIsEditingIdentity(false);
+      showToast('کد ملی و شماره موبایل متقاضی با موفقیت اصلاح شد.');
+      onUpdated();
+    } catch {
+      setIdentityEditError('خطا در ارتباط با سرور هنگام ذخیره تغییرات.');
+    } finally {
+      setIsSavingIdentity(false);
+    }
+  };
+
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-900/70 p-4 overflow-y-auto">
       <div className="relative w-full max-w-6xl rounded-xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-2xl my-6 overflow-hidden">
@@ -368,9 +437,87 @@ export const DossierDrawerModal: React.FC<DossierDrawerModalProps> = ({
             <div className="space-y-6">
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="border border-slate-200 dark:border-slate-800 rounded-xl p-5">
-                  <h3 className="text-sm font-bold text-slate-900 dark:text-white border-b border-slate-100 dark:border-slate-800 pb-2.5 mb-3">
-                    بخش ۱: اطلاعات هویتی متقاضی
-                  </h3>
+                  <div className="flex items-center justify-between gap-2 border-b border-slate-100 dark:border-slate-800 pb-2.5 mb-3">
+                    <h3 className="text-sm font-bold text-slate-900 dark:text-white">
+                      بخش ۱: اطلاعات هویتی متقاضی
+                    </h3>
+                    {!isEditingIdentity && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditNationalCode(dossier.national_code || '');
+                          setEditMobile(dossier.mobile || '');
+                          setIdentityEditError('');
+                          setIsEditingIdentity(true);
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/70 dark:bg-blue-950/40 px-2.5 py-1 text-[11px] font-bold text-blue-600 dark:text-blue-400 hover:bg-blue-100/70 cursor-pointer"
+                      >
+                        <Edit3 className="w-3 h-3" />
+                        <span>ویرایش کد ملی / موبایل</span>
+                      </button>
+                    )}
+                  </div>
+
+                  {isEditingIdentity && (
+                    <form
+                      onSubmit={handleSaveIdentityContact}
+                      className="mb-4 rounded-lg border border-blue-200 dark:border-blue-900 bg-blue-50/50 dark:bg-blue-950/20 p-3.5 space-y-3 text-xs"
+                    >
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                        <div>
+                          <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                            کد ملی ۱۰ رقمی
+                          </label>
+                          <input
+                            type="text"
+                            maxLength={10}
+                            value={editNationalCode}
+                            onChange={(e) => setEditNationalCode(toEnglishDigits(e.target.value).replace(/\D/g, ''))}
+                            className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-bold tabular-nums"
+                            dir="ltr"
+                          />
+                        </div>
+                        <div>
+                          <label className="block font-semibold text-slate-700 dark:text-slate-300 mb-1">
+                            شماره موبایل متقاضی
+                          </label>
+                          <input
+                            type="tel"
+                            maxLength={11}
+                            value={editMobile}
+                            onChange={(e) => setEditMobile(toEnglishDigits(e.target.value).replace(/\D/g, ''))}
+                            className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 text-xs font-bold tabular-nums"
+                            dir="ltr"
+                          />
+                        </div>
+                      </div>
+                      {identityEditError && (
+                        <p className="text-rose-600 dark:text-rose-400 font-semibold">{identityEditError}</p>
+                      )}
+                      <div className="flex items-center justify-end gap-2">
+                        <button
+                          type="button"
+                          disabled={isSavingIdentity}
+                          onClick={() => {
+                            setIsEditingIdentity(false);
+                            setIdentityEditError('');
+                          }}
+                          className="rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3 py-1.5 font-semibold text-slate-600 dark:text-slate-300 cursor-pointer"
+                        >
+                          انصراف
+                        </button>
+                        <button
+                          type="submit"
+                          disabled={isSavingIdentity}
+                          className="inline-flex items-center gap-1 rounded-lg bg-blue-600 px-3.5 py-1.5 font-bold text-white hover:bg-blue-700 cursor-pointer disabled:opacity-60"
+                        >
+                          <Save className="w-3.5 h-3.5" />
+                          <span>{isSavingIdentity ? 'در حال ذخیره...' : 'ذخیره تغییرات'}</span>
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
                   <div className="grid grid-cols-2 gap-3 text-xs">
                     <div><span className="text-slate-500">نام و نام خانوادگی:</span> <strong>{dossier.full_name}</strong></div>
                     <div className="tabular-nums"><span className="text-slate-500">کد ملی:</span> <strong>{toPersianDigits(dossier.national_code)}</strong></div>

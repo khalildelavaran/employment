@@ -1781,20 +1781,20 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold mb-1.5">۳. کد ملی ۱۰ رقمی *</label>
+                    <label className="block text-xs font-semibold mb-1.5">
+                      ۳. کد ملی ۱۰ رقمی (ثبت‌شده در ورود)
+                    </label>
                     <input
                       type="text"
                       maxLength={10}
-                      readOnly={isEditingSubmitted}
-                      disabled={isEditingSubmitted}
-                      value={nationalCode}
-                      onChange={(e) => setNationalCode(e.target.value)}
-                      className={`w-full rounded-lg border border-slate-300 dark:border-slate-700 px-3.5 py-2 text-sm tabular-nums ${
-                        isEditingSubmitted
-                          ? 'bg-slate-100 dark:bg-slate-800/50 text-slate-500 cursor-not-allowed'
-                          : 'bg-white dark:bg-slate-800'
-                      }`}
+                      readOnly
+                      disabled
+                      value={toPersianDigits(nationalCode)}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/60 px-3.5 py-2 text-sm font-bold text-slate-600 dark:text-slate-300 tabular-nums cursor-not-allowed"
                     />
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                      کد ملی پس از ورود اولیه قابل تغییر نیست.
+                    </p>
                     {fieldErrors.nationalCode && <p className="text-xs text-rose-600 mt-1">{fieldErrors.nationalCode}</p>}
                   </div>
 
@@ -1900,14 +1900,20 @@ export const ApplicantPortal: React.FC<{ onSwitchToAdmin?: () => void }> = () =>
                   </div>
 
                   <div>
-                    <label className="block text-xs font-semibold mb-1.5">۱۲. شماره موبایل متقاضی *</label>
+                    <label className="block text-xs font-semibold mb-1.5">
+                      ۱۲. شماره موبایل متقاضی (ثبت‌شده در ورود)
+                    </label>
                     <input
                       type="tel"
                       maxLength={11}
-                      value={mobile}
-                      onChange={(e) => setMobile(e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 px-3.5 py-2 text-sm tabular-nums"
+                      readOnly
+                      disabled
+                      value={toPersianDigits(mobile)}
+                      className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-slate-100 dark:bg-slate-800/60 px-3.5 py-2 text-sm font-bold text-slate-600 dark:text-slate-300 tabular-nums cursor-not-allowed"
                     />
+                    <p className="text-[11px] text-slate-400 dark:text-slate-500 mt-1">
+                      شماره موبایل پس از ورود اولیه قابل تغییر نیست.
+                    </p>
                     {fieldErrors.mobile && <p className="text-xs text-rose-600 mt-1">{fieldErrors.mobile}</p>}
                   </div>
                 </div>

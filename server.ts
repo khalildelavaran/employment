@@ -591,12 +591,13 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
     const saveTx = raw.transaction(() => {
       const existing = db
         .prepare(
-          `SELECT id, city, district, district_input_mode, full_address, has_work_experience, resume_text
+          `SELECT id, mobile, city, district, district_input_mode, full_address, has_work_experience, resume_text
            FROM applicants WHERE national_code = ?`
         )
         .bind(cleanNat)
         .first<{
           id: number;
+          mobile: string;
           city: string;
           district: string;
           district_input_mode: string;
@@ -650,6 +651,10 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
           .bind(applicantId)
           .first<{ id: number; is_submitted: number; status_code: string; is_terminal: number }>();
 
+        if (existing.mobile && existing.mobile !== cleanMob) {
+          throw new Error('کد ملی و شماره موبایل پس از اولین ورود قابل تغییر نیستند. در صورت نیاز به اصلاح با مدیریت تماس بگیرید.');
+        }
+
         if (existingApp && existingApp.is_submitted === 1 && existingApp.is_terminal === 1) {
           throw new Error('پرونده شما در وضعیت نهایی (استخدام، رد یا انصراف) قرار دارد و دیگر قابل ویرایش نیست.');
         }
@@ -678,7 +683,7 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
           `UPDATE applicants SET
             first_name = ?, last_name = ?, gender = ?, birth_date_jalali = ?, birth_year_jalali = ?,
             calculated_age = ?, marital_status = ?, military_status = ?, father_name = ?,
-            father_alive_status = ?, father_job = ?, mobile = ?, city = ?, district = ?,
+            father_alive_status = ?, father_job = ?, city = ?, district = ?,
             district_input_mode = ?, full_address = ?, has_work_experience = ?, resume_text = ?, updated_at = datetime('now')
            WHERE id = ?`
         )
@@ -694,7 +699,6 @@ app.post('/api/public/save-draft', (req: Request, res: Response) => {
             String(payload.father_name || '').trim(),
             String(payload.father_alive_status || 'در قید حیات'),
             String(payload.father_job || '').trim(),
-            cleanMob,
             nextCity,
             nextDistrict,
             nextDistrictMode,
@@ -1903,6 +1907,98 @@ app.post('/api/admin/applicants/:applicationId/notes', (req: Request, res: Respo
   )
     .bind(applicationId, ADMIN_ACTOR_NAME, nowJalali)
     .run();
+
+  res.json({ success: true, dossier: buildFullDossier(applicationId, true) });
+});
+
+app.patch('/api/admin/applicants/:applicationId/identity-contact', (req: Request, res: Response) => {
+  const applicationId = Number(req.params.applicationId);
+  const cleanNat = toEnglishDigits(String(req.body?.national_code || '')).trim();
+  const cleanMob = toEnglishDigits(String(req.body?.mobile || '')).trim();
+
+  const natVal = validateIranianNationalCode(cleanNat);
+  if (!natVal.valid) {
+    res.status(400).json({ error: natVal.message || 'کد ملی واردشده معتبر نیست.' });
+    return;
+  }
+
+  const mobVal = validateIranianMobile(cleanMob);
+  if (!mobVal.valid) {
+    res.status(400).json({ error: mobVal.message || 'شماره موبایل واردشده معتبر نیست.' });
+    return;
+  }
+
+  const appRecord = db
+    .prepare(
+      `SELECT ra.id as application_id, ra.applicant_id, a.national_code, a.mobile, a.first_name, a.last_name
+       FROM recruitment_applications ra
+       JOIN applicants a ON a.id = ra.applicant_id
+       WHERE ra.id = ?`
+    )
+    .bind(applicationId)
+    .first<{
+      application_id: number;
+      applicant_id: number;
+      national_code: string;
+      mobile: string;
+      first_name: string;
+      last_name: string;
+    }>();
+
+  if (!appRecord) {
+    res.status(404).json({ error: 'پرونده متقاضی یافت نشد.' });
+    return;
+  }
+
+  const duplicateNat = db
+    .prepare('SELECT id FROM applicants WHERE national_code = ? AND id != ?')
+    .bind(cleanNat, appRecord.applicant_id)
+    .first<{ id: number }>();
+
+  if (duplicateNat) {
+    res.status(409).json({
+      error: 'این کد ملی قبلاً برای متقاضی دیگری در سامانه ثبت شده است.',
+    });
+    return;
+  }
+
+  const nowJalali = getCurrentJalaliDateTime();
+  const changes: string[] = [];
+  if (appRecord.national_code !== cleanNat) {
+    changes.push(`کد ملی: ${appRecord.national_code} ← ${cleanNat}`);
+  }
+  if (appRecord.mobile !== cleanMob) {
+    changes.push(`موبایل: ${appRecord.mobile} ← ${cleanMob}`);
+  }
+
+  if (changes.length > 0) {
+    db.prepare(
+      `UPDATE applicants
+       SET national_code = ?, mobile = ?, updated_at = datetime('now')
+       WHERE id = ?`
+    )
+      .bind(cleanNat, cleanMob, appRecord.applicant_id)
+      .run();
+
+    db.prepare(
+      `UPDATE recruitment_applications
+       SET updated_at_jalali = ?
+       WHERE id = ?`
+    )
+      .bind(nowJalali, applicationId)
+      .run();
+
+    const changeDesc = `اصلاح مشخصات پایه توسط مدیر (${changes.join(' | ')})`;
+    db.prepare(
+      `INSERT INTO recruitment_events (
+        application_id, event_type, title, description, actor_name, event_date_jalali
+      ) VALUES (?, 'IDENTITY_UPDATE', 'اصلاح کد ملی / شماره موبایل', ?, ?, ?)`
+    )
+      .bind(applicationId, changeDesc, ADMIN_ACTOR_NAME, nowJalali)
+      .run();
+
+    logAudit('UPDATE_APPLICANT_IDENTITY_CONTACT', 'APPLICATION', String(applicationId), changeDesc);
+  }
 
   res.json({ success: true, dossier: buildFullDossier(applicationId, true) });
 });
